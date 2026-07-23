@@ -10,6 +10,7 @@
 #
 # Options:
 #   --task TEXT         Task description (prompted if omitted)
+#   --task-file FILE   Read task description from file (for long/multiline tasks)
 #   --room NAME        Chat room name (default: auto-generated from task)
 #   --server URL       Chait server URL (default: http://localhost:3100)
 #   --team SPEC        Comma-separated roles or role:name pairs
@@ -64,6 +65,7 @@ declare -A ROLE_CARDS=(
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --task)     TASK="$2"; shift 2 ;;
+    --task-file) TASK="$(cat "$2")"; shift 2 ;;
     --room)     ROOM="$2"; shift 2 ;;
     --server)   SERVER="$2"; shift 2 ;;
     --team)     TEAM_SPEC="$2"; shift 2 ;;
@@ -84,13 +86,15 @@ done
 if [[ -z "$TASK" ]]; then
   echo "=== chait — team launcher ==="
   echo ""
-  read -rp "Task description: " TASK
+  echo "Task description (paste multiline text, then press Ctrl+D when done):"
+  TASK="$(cat)"
+  TASK="$(echo "$TASK" | sed '/^$/d')"  # strip blank lines
   [[ -z "$TASK" ]] && { echo "Task required."; exit 1; }
 fi
 
 if [[ -z "$ROOM" ]]; then
-  # Auto-generate room name from task
-  ROOM=$(echo "$TASK" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-40 | sed 's/-$//')
+  # Auto-generate room name from first line of task
+  ROOM=$(echo "$TASK" | head -1 | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-40 | sed 's/-$//')
 fi
 
 if [[ -z "$TEAM_SPEC" ]]; then
