@@ -293,6 +293,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="chait", lifespan=lifespan)
 
 # ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+@app.get("/health")
+async def health():
+    try:
+        db = await get_db()
+        await db.execute_fetchall("SELECT 1")
+        return {"status": "ok"}
+    except Exception:
+        raise HTTPException(503, "Database unavailable")
+
+
+# ---------------------------------------------------------------------------
 # Instructions endpoint
 # ---------------------------------------------------------------------------
 INSTRUCTIONS = """# chait API
@@ -379,6 +392,7 @@ async def join_with_token(request: Request):
         (room["id"], agent_id, _now()),
     )
     await db.commit()
+    logger.info("Agent '%s' (role=%s) joined room '%s'", name, role, room["name"])
     # Include room context so agents know what they're joining
     docs = await db.execute_fetchall(
         "SELECT id, filename, size, created_at FROM documents WHERE room_id = ? ORDER BY created_at",
@@ -425,6 +439,7 @@ async def api_create_room(request: Request, _token: str = Depends(auth_master_to
         (room_id, name, topic, join_token, _now()),
     )
     await db.commit()
+    logger.info("Room '%s' created (id=%s)", name, room_id)
     return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
 
 
@@ -752,6 +767,7 @@ async def login_submit(request: Request):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", max_age=86400 * 7)
         return resp
+    logger.warning("Login failed for user '%s' from %s", form.get("user", ""), request.client.host if request.client else "unknown")
     return HTMLResponse(
         "<html><body style='background:#0f172a;color:#f87171;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh'>Invalid credentials. <a href='/login' style='color:#38bdf8;margin-left:8px'>Retry</a></body></html>",
         401,
@@ -991,5 +1007,12 @@ async def ui_revoke_api_token(token_id: str, session: str = Depends(require_huma
 if __name__ == "__main__":
     import uvicorn
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    if HUMAN_PASS == "changeme":
+        HUMAN_PASS = secrets.token_urlsafe(16)
+        logger.warning("No CHAIT_HUMAN_PASS set. Generated: %s", HUMAN_PASS)
     host = os.getenv("CHAIT_HOST", "0.0.0.0")
     uvicorn.run(app, host=host, port=PORT, log_level="info")

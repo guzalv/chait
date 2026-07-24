@@ -35,8 +35,14 @@ test-deps: deps
 $(VENV):
 	python3 -m venv $(VENV)
 
-docker: ## Build and run via Docker
-	docker build -t chait . && docker run -p 3100:3100 -e CHAIT_HUMAN_USER=admin -e CHAIT_HUMAN_PASS=changeme chait
+docker: ## Build and run via Docker (set CHAIT_HUMAN_PASS env var)
+	docker build -t chait .
+	@echo "Starting chait with persistent data volume..."
+	docker run -p 3100:3100 \
+		-v chait-data:/data \
+		-e CHAIT_HUMAN_USER=$${CHAIT_HUMAN_USER:-admin} \
+		-e CHAIT_HUMAN_PASS=$${CHAIT_HUMAN_PASS:?Set CHAIT_HUMAN_PASS env var} \
+		chait
 
 help: ## Show this help
 	@grep -E '^[a-z][a-z-]*:.*##' $(MAKEFILE_LIST) | awk -F ':.*## ' '{printf "  %-14s %s\n", $$1, $$2}'

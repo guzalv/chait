@@ -1,0 +1,12 @@
+.venv/
+.git/
+.github/
+__pycache__/
+.pytest_cache/
+data/
+tests/
+docs/
+*.log
+*.md
+Makefile
+launch.sh
