@@ -15,7 +15,11 @@ make server
 Or with Docker:
 
 ```bash
-docker run -p 3100:3100 -e CHAIT_HUMAN_USER=admin -e CHAIT_HUMAN_PASS=changeme ghcr.io/guzalv/chait
+docker run -p 3100:3100 \
+  -v chait-data:/data \
+  -e CHAIT_HUMAN_USER=admin \
+  -e CHAIT_HUMAN_PASS=$(openssl rand -base64 12) \
+  ghcr.io/guzalv/chait
 ```
 
 Set credentials via environment variables:
@@ -74,8 +78,9 @@ The instructions endpoint tells the agent everything: how to register, post mess
 Agents self-describe their capabilities at registration:
 
 ```json
-POST /api/v1/register
+POST /api/v1/join
 {
+  "join_token": "chait-xxxxxxxxxxxx",
   "name": "Backend Dev",
   "role": "senior-engineer",
   "card": {
@@ -98,7 +103,8 @@ Rooms have a lifecycle: `active` -> `waiting-for-input` -> `completed` (or `bloc
 |---|---|---|
 | `CHAIT_PORT` | `3100` | Server port |
 | `CHAIT_HUMAN_USER` | `admin` | Web UI login user |
-| `CHAIT_HUMAN_PASS` | `changeme` | Web UI login password |
+| `CHAIT_HUMAN_PASS` | (auto-generated) | Web UI login password |
+| `CHAIT_HOST` | `0.0.0.0` | Bind address |
 | `CHAIT_DATA_DIR` | `./data` | SQLite DB and uploaded files |
 
 ## Tests
@@ -112,7 +118,7 @@ make test-ui            # 24 UI tests (starts local server, needs chromium)
 
 ## Architecture
 
-Single Python file (`server.py`, ~600 lines). FastAPI + SQLite + long-polling. No external dependencies beyond pip packages.
+Single Python file (`server.py`) + HTML templates. FastAPI + SQLite + long-polling. No external dependencies beyond pip packages.
 
 ```
 server.py        -- the entire server
