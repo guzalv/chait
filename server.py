@@ -42,6 +42,7 @@ HUMAN_PASS = os.getenv("CHAIT_HUMAN_PASS", "changeme")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 TOKEN_TTL_HOURS = int(os.getenv("CHAIT_TOKEN_TTL_HOURS", "24"))
 MAX_MESSAGE_LENGTH = 100_000  # 100 KB
+RATE_LIMIT_MULTIPLIER = int(os.getenv("CHAIT_RATE_LIMIT_MULTIPLIER", "1"))
 RESERVED_ROLES = {"god", "human", "admin", "system"}
 
 # Rate limiting
@@ -53,7 +54,7 @@ def _check_rate(key: str, max_per_minute: int = 30):
     now = time.time()
     bucket = _rate_buckets.setdefault(key, [])
     bucket[:] = [t for t in bucket if now - t < 60]
-    if len(bucket) >= max_per_minute:
+    if len(bucket) >= max_per_minute * RATE_LIMIT_MULTIPLIER:
         raise ApiError(429, "RATE_LIMITED", "Rate limit exceeded. Try again later.")
     bucket.append(now)
 

@@ -39,6 +39,7 @@ def _run_server(port, data_dir):
     os.environ["CHAIT_HUMAN_PASS"] = PASS
     os.environ["CHAIT_DATA_DIR"] = data_dir
     os.environ["CHAIT_TOKEN_TTL_HOURS"] = "0"  # no token expiry in tests
+    os.environ["CHAIT_RATE_LIMIT_MULTIPLIER"] = "100"  # effectively disable rate limits
     import uvicorn
 
     # Import after setting env so config picks it up
@@ -334,8 +335,9 @@ class TestAgentCards:
 
     def test_agent_card_has_dm_button(self, driver, server_url, logged_in, test_data):
         self._select_room(driver, server_url, test_data)
-        dm_btns = driver.find_elements(By.CSS_SELECTOR, ".agent-card .dm-btn")
-        assert len(dm_btns) >= 1
+        WebDriverWait(driver, 5).until(
+            lambda d: len(d.find_elements(By.CSS_SELECTOR, ".agent-card .dm-btn")) >= 1
+        )
 
 
 # ── Human messaging ──────────────────────────────────────────────────────
