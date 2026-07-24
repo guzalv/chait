@@ -34,6 +34,7 @@ HUMAN_USER = os.getenv("CHAIT_HUMAN_USER", "admin")
 HUMAN_PASS = os.getenv("CHAIT_HUMAN_PASS", "changeme")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 MAX_MESSAGE_LENGTH = 100_000  # 100 KB
+RESERVED_ROLES = {"god", "human", "admin", "system"}
 
 # Long-poll: new-message event per agent
 _unread_events: dict[str, asyncio.Event] = {}
@@ -197,8 +198,37 @@ async def auth_human(request: Request) -> Optional[str]:
     if not session_token:
         return None
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT * FROM sessions WHERE token = ?", (session_token,))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM sessions WHERE token = ? AND created_at > ?",
+        (session_token, cutoff))
     return session_token if rows else None
+
+
+async def auth_any(request: Request) -> dict:
+    """Accept either agent bearer token or human session cookie."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return await auth_agent(request)
+    session_token = request.cookies.get("chait_session")
+    if session_token:
+        result = await auth_human(request)
+        if result:
+            return {"type": "human"}
+    raise HTTPException(401, "Authentication required")
+
+
+async def _require_room_member(db: aiosqlite.Connection, room_name: str, agent_id: str) -> str:
+    """Resolve room name to ID and verify agent membership. Returns room_id."""
+    rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
+    if not rows:
+        raise HTTPException(404, "Room not found")
+    room_id = dict(rows[0])["id"]
+    member = await db.execute_fetchall(
+        "SELECT 1 FROM room_members WHERE room_id = ? AND agent_id = ?", (room_id, agent_id))
+    if not member:
+        raise HTTPException(403, "Not a member of this room")
+    return room_id
 
 
 async def require_human(request: Request) -> str:
@@ -315,6 +345,8 @@ async def join_with_token(request: Request):
         raise HTTPException(400, "join_token required")
     if not name:
         raise HTTPException(400, "name required")
+    if role in RESERVED_ROLES:
+        raise HTTPException(400, f"role '{role}' is reserved")
     db = await get_db()
     rows = await db.execute_fetchall("SELECT * FROM rooms WHERE join_token = ?", (join_token,))
     if not rows:
@@ -407,14 +439,13 @@ async def list_rooms(agent: dict = Depends(auth_agent)):
 @app.get("/api/v1/rooms/{room_name}")
 async def get_room(room_name: str, agent: dict = Depends(auth_agent)):
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT * FROM rooms WHERE name = ?", (room_name,))
-    if not rows:
-        raise HTTPException(404, "Room not found")
+    room_id = await _require_room_member(db, room_name, agent["id"])
+    rows = await db.execute_fetchall("SELECT * FROM rooms WHERE id = ?", (room_id,))
     room = dict(rows[0])
     room.pop("join_token", None)  # never expose join_token to agents
     members = await db.execute_fetchall(
         "SELECT a.id, a.name, a.role, a.card FROM agents a JOIN room_members rm ON a.id = rm.agent_id WHERE rm.room_id = ?",
-        (room["id"],),
+        (room_id,),
     )
     room["members"] = [{"id": dict(m)["id"], "name": dict(m)["name"], "role": dict(m)["role"], "card": _parse_card(dict(m).get("card"))} for m in members]
     return room
@@ -427,10 +458,8 @@ async def set_room_status(room_name: str, request: Request, agent: dict = Depend
     if new_status not in VALID_ROOM_STATUSES:
         raise HTTPException(400, f"status must be one of: {', '.join(VALID_ROOM_STATUSES)}")
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
-    if not rows:
-        raise HTTPException(404, "Room not found")
-    await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, dict(rows[0])["id"]))
+    room_id = await _require_room_member(db, room_name, agent["id"])
+    await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
     await db.commit()
     return {"room": room_name, "status": new_status}
 
@@ -448,10 +477,7 @@ async def post_message(room_name: str, request: Request, agent: dict = Depends(a
     if len(text) > MAX_MESSAGE_LENGTH:
         raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
-    if not rows:
-        raise HTTPException(404, "Room not found")
-    room_id = dict(rows[0])["id"]
+    room_id = await _require_room_member(db, room_name, agent["id"])
     msg_id = _uid()
     now = _now()
     await db.execute(
@@ -470,10 +496,7 @@ async def get_messages(
     limit: int = Query(default=50, le=200), agent: dict = Depends(auth_agent),
 ):
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
-    if not rows:
-        raise HTTPException(404, "Room not found")
-    room_id = dict(rows[0])["id"]
+    room_id = await _require_room_member(db, room_name, agent["id"])
     if since:
         msgs = await db.execute_fetchall(
             "SELECT * FROM messages WHERE room_id = ? AND created_at > ? ORDER BY created_at LIMIT ?",
@@ -499,6 +522,9 @@ async def send_dm(target_id: str, request: Request, agent: dict = Depends(auth_a
     if len(text) > MAX_MESSAGE_LENGTH:
         raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
+    target = await db.execute_fetchall("SELECT id FROM agents WHERE id = ?", (target_id,))
+    if not target:
+        raise HTTPException(404, "Target agent not found")
     dm_id = _uid()
     now = _now()
     await db.execute(
@@ -597,10 +623,7 @@ async def unread(
 @app.post("/api/v1/rooms/{room_name}/documents")
 async def upload_document(room_name: str, file: UploadFile = File(...), agent: dict = Depends(auth_agent)):
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
-    if not rows:
-        raise HTTPException(404, "Room not found")
-    room_id = dict(rows[0])["id"]
+    room_id = await _require_room_member(db, room_name, agent["id"])
     doc_id = _uid()
     room_doc_dir = DOCS_DIR / room_id
     room_doc_dir.mkdir(parents=True, exist_ok=True)
@@ -622,17 +645,14 @@ async def upload_document(room_name: str, file: UploadFile = File(...), agent: d
 @app.get("/api/v1/rooms/{room_name}/documents")
 async def list_documents(room_name: str, agent: dict = Depends(auth_agent)):
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
-    if not rows:
-        raise HTTPException(404, "Room not found")
-    room_id = dict(rows[0])["id"]
+    room_id = await _require_room_member(db, room_name, agent["id"])
     docs = await db.execute_fetchall("SELECT * FROM documents WHERE room_id = ? ORDER BY created_at", (room_id,))
     return [{"id": dict(d)["id"], "filename": dict(d)["filename"], "size": dict(d)["size"],
              "uploaded_by": dict(d)["uploaded_by"], "created_at": dict(d)["created_at"]} for d in docs]
 
 
 @app.get("/api/v1/documents/{doc_id}/download")
-async def download_document(doc_id: str):
+async def download_document(doc_id: str, _auth: dict = Depends(auth_any)):
     db = await get_db()
     rows = await db.execute_fetchall("SELECT * FROM documents WHERE id = ?", (doc_id,))
     if not rows:
@@ -667,9 +687,21 @@ async def login_submit(request: Request):
         await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (tok, _now()))
         await db.commit()
         resp = RedirectResponse("/", status_code=303)
-        resp.set_cookie("chait_session", tok, httponly=True, max_age=86400 * 7)
+        resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", max_age=86400 * 7)
         return resp
     return HTMLResponse("<html><body style='background:#0f172a;color:#f87171;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh'>Invalid credentials. <a href='/login' style='color:#38bdf8;margin-left:8px'>Retry</a></body></html>", 401)
+
+
+@app.post("/logout")
+async def logout(request: Request):
+    session_token = request.cookies.get("chait_session")
+    if session_token:
+        db = await get_db()
+        await db.execute("DELETE FROM sessions WHERE token = ?", (session_token,))
+        await db.commit()
+    resp = RedirectResponse("/login", status_code=303)
+    resp.delete_cookie("chait_session")
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +774,7 @@ body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f
 }
 </style></head><body>
 <div id="sidebar">
-  <h1>chait <button class="btn btn-sm" onclick="openNewRoom()">+ Room</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openApiTokens()">API Key</button></h1>
+  <h1>chait <button class="btn btn-sm" onclick="openNewRoom()">+ Room</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openApiTokens()">API Key</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="doLogout()">Logout</button></h1>
   <div id="rooms-list"></div>
 </div>
 <div id="main">
@@ -826,8 +858,8 @@ async function loadRooms(){
   const rooms=await api('/ui/api/rooms');if(!rooms)return;
   document.getElementById('rooms-list').innerHTML=rooms.map(r=>{
     let sc='status-'+r.status;
-    return `<div class="room-item ${currentRoom===r.name?'active':''}" onclick="selectRoom('${r.name}')">
-      <span>${r.name}</span><span class="room-status ${sc}">${r.status}</span></div>`
+    return `<div class="room-item ${currentRoom===r.name?'active':''}" onclick="selectRoom(${JSON.stringify(r.name)})">
+      <span>${esc(r.name)}</span><span class="room-status ${sc}">${esc(r.status)}</span></div>`
   }).join('');
 }
 function isMobile(){return window.innerWidth<768}
@@ -858,9 +890,9 @@ function appendMessages(msgs){const el=document.getElementById('messages');el.in
 function fmtMsg(m){
   const pri=m.priority?' priority':'',badge=m.priority?'<span class="priority-badge">PRIORITY</span>':'';
   const t=new Date(m.created_at).toLocaleTimeString();
-  return `<div class="msg${pri}"><div class="meta"><span class="name">${m.author_name}</span> <span class="role">[${m.author_role}]</span> ${t}${badge}</div><div class="text">${esc(m.text)}</div></div>`;
+  return `<div class="msg${pri}"><div class="meta"><span class="name">${esc(m.author_name)}</span> <span class="role">[${esc(m.author_role)}]</span> ${t}${badge}</div><div class="text">${esc(m.text)}</div></div>`;
 }
-function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function esc(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 async function loadRoomDetails(){
   const room=await api(`/ui/api/rooms/${currentRoom}/details`);if(!room)return;
   document.getElementById('room-topic').textContent=room.topic||'';
@@ -868,14 +900,14 @@ async function loadRoomDetails(){
   sb.textContent=room.status;sb.className='room-status status-'+room.status;
   document.getElementById('agents-list').innerHTML=(room.members||[]).map(m=>{
     const card=m.card||{};const skills=(card.skills||[]).join(', ');
-    return `<div class="agent-card"><div class="agent-name">${m.name}</div><div class="agent-role">${m.role}</div>
+    return `<div class="agent-card"><div class="agent-name">${esc(m.name)}</div><div class="agent-role">${esc(m.role)}</div>
       ${card.description?`<div class="agent-skills">${esc(card.description)}</div>`:''}
       ${skills?`<div class="agent-skills">Skills: ${esc(skills)}</div>`:''}
-      <button class="btn btn-sm dm-btn" onclick="openDM('${m.id}','${esc(m.name)}')">DM</button></div>`;
+      <button class="btn btn-sm dm-btn" onclick="openDM(${JSON.stringify(m.id)},${JSON.stringify(m.name)})">DM</button></div>`;
   }).join('');
   const docs=await api(`/ui/api/rooms/${currentRoom}/documents`);
   document.getElementById('docs-list').innerHTML=(docs||[]).map(d=>
-    `<div class="doc-item"><a href="/api/v1/documents/${d.id}/download" target="_blank">${d.filename}</a> <span style="color:#64748b;font-size:.65rem">${(d.size/1024).toFixed(1)}KB</span></div>`
+    `<div class="doc-item"><a href="/api/v1/documents/${encodeURIComponent(d.id)}/download" target="_blank">${esc(d.filename)}</a> <span style="color:#64748b;font-size:.65rem">${(d.size/1024).toFixed(1)}KB</span></div>`
   ).join('');
 }
 async function sendMessage(){
@@ -928,8 +960,8 @@ async function openApiTokens(){
   if(!tokens.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem;margin-bottom:.5rem">No API tokens yet.</div>';return}
   el.innerHTML=tokens.map(t=>
     `<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.4rem">
-      <div class="token-display" style="flex:1;margin:0;font-size:.7rem" onclick="navigator.clipboard.writeText(this.textContent)">${t.token}</div>
-      <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="revokeApiToken('${t.id}')">Revoke</button>
+      <div class="token-display" style="flex:1;margin:0;font-size:.7rem" onclick="navigator.clipboard.writeText(this.textContent)">${esc(t.token)}</div>
+      <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="revokeApiToken(${JSON.stringify(t.id)})">Revoke</button>
     </div>`
   ).join('');
 }
@@ -942,6 +974,7 @@ async function revokeApiToken(id){
   openApiTokens();
 }
 document.getElementById('msg-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});
+async function doLogout(){await fetch('/logout',{method:'POST'});location='/login'}
 loadRooms();setInterval(loadRooms,10000);
 </script></body></html>"""
 
