@@ -105,7 +105,7 @@ def test_multi_agent_room_conversation(client):
         assert any(m["text"] == "Looks good, implementing" for m in data["room_messages"])
 
     # All messages in correct order with correct authors
-    msgs = client.get("/api/v1/rooms/project-x/messages", headers=_auth(a["token"])).json()
+    msgs = client.get("/api/v1/rooms/project-x/messages", headers=_auth(a["token"])).json()["data"]
     assert len(msgs) == 2
     assert msgs[0]["author_name"] == "Alice"
     assert msgs[1]["author_name"] == "Bob"
@@ -198,7 +198,7 @@ def test_dm_routing(client):
     assert len(c_data["dms"]) == 0
 
     # B reads DM history with A
-    history = client.get(f"/api/v1/dm/{a['id']}", headers=_auth(b["token"])).json()
+    history = client.get(f"/api/v1/dm/{a['id']}", headers=_auth(b["token"])).json()["data"]
     assert len(history) == 1
     assert history[0]["text"] == "private to Bob"
     assert history[0]["from_id"] == a["id"]
@@ -285,7 +285,7 @@ def test_document_sharing(client):
     assert doc["size"] == len(content)
 
     # B lists documents
-    docs = client.get("/api/v1/rooms/docs-room/documents", headers=_auth(b["token"])).json()
+    docs = client.get("/api/v1/rooms/docs-room/documents", headers=_auth(b["token"])).json()["data"]
     assert len(docs) == 1
     assert docs[0]["filename"] == "design.md"
     assert docs[0]["uploaded_by"] == a["id"]
@@ -320,7 +320,7 @@ def test_concurrent_message_ordering(client):
 
     assert not errors, f"Thread errors: {errors}"
 
-    msgs = client.get("/api/v1/rooms/concurrent/messages", headers=_auth(agents[0]["token"])).json()
+    msgs = client.get("/api/v1/rooms/concurrent/messages", headers=_auth(agents[0]["token"])).json()["data"]
     assert len(msgs) == 5
 
     # Monotonically non-decreasing timestamps
@@ -425,13 +425,13 @@ def test_full_workflow_simulation(client):
     assert r.status_code == 200
 
     # --- Final assertions ---
-    msgs = client.get("/api/v1/rooms/sprint-task/messages", headers=_auth(pm["token"])).json()
+    msgs = client.get("/api/v1/rooms/sprint-task/messages", headers=_auth(pm["token"])).json()["data"]
     assert len(msgs) == 4
     assert [m["author_name"] for m in msgs] == ["PM", "Lead", "Dev", "Dev"]
     for i in range(1, len(msgs)):
         assert msgs[i]["created_at"] >= msgs[i - 1]["created_at"]
 
-    docs = client.get("/api/v1/rooms/sprint-task/documents", headers=_auth(pm["token"])).json()
+    docs = client.get("/api/v1/rooms/sprint-task/documents", headers=_auth(pm["token"])).json()["data"]
     assert len(docs) == 1
     assert docs[0]["filename"] == "api-design.md"
 
@@ -458,7 +458,7 @@ def test_human_document_upload_visible_to_agents(client):
     assert doc["filename"] == "context.txt"
 
     # Agent sees it in listing
-    docs = client.get("/api/v1/rooms/human-docs/documents", headers=_auth(agent["token"])).json()
+    docs = client.get("/api/v1/rooms/human-docs/documents", headers=_auth(agent["token"])).json()["data"]
     assert len(docs) == 1
     assert docs[0]["filename"] == "context.txt"
     assert docs[0]["uploaded_by"] == "human"

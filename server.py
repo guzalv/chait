@@ -24,7 +24,8 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
 # Config
@@ -53,7 +54,7 @@ def _check_rate(key: str, max_per_minute: int = 30):
     bucket = _rate_buckets.setdefault(key, [])
     bucket[:] = [t for t in bucket if now - t < 60]
     if len(bucket) >= max_per_minute:
-        raise HTTPException(429, "Rate limit exceeded. Try again later.")
+        raise ApiError(429, "RATE_LIMITED", "Rate limit exceeded. Try again later.")
     bucket.append(now)
 
 
@@ -198,13 +199,13 @@ async def _get_agent_by_token(token: str) -> Optional[dict]:
 async def auth_agent(request: Request) -> dict:
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing Bearer token")
+        raise ApiError(401, "AUTH_REQUIRED", "Missing Bearer token")
     agent = await _get_agent_by_token(auth[7:])
     if not agent:
         logger.warning("Auth failed: invalid token from %s", request.client.host if request.client else "unknown")
-        raise HTTPException(401, "Invalid token")
+        raise ApiError(401, "AUTH_FAILED", "Invalid token")
     if agent.get("expires_at") and agent["expires_at"] < _now():
-        raise HTTPException(401, "Token expired")
+        raise ApiError(401, "TOKEN_EXPIRED", "Token expired")
     return agent
 
 
@@ -212,12 +213,12 @@ async def auth_master_token(request: Request) -> str:
     """Validate Bearer token against api_tokens table."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing Bearer token")
+        raise ApiError(401, "AUTH_REQUIRED", "Missing Bearer token")
     token = auth[7:]
     db = await get_db()
     rows = await db.execute_fetchall("SELECT id FROM api_tokens WHERE token = ?", (token,))
     if not rows:
-        raise HTTPException(401, "Invalid API token")
+        raise ApiError(401, "AUTH_FAILED", "Invalid API token")
     return token
 
 
@@ -243,14 +244,14 @@ async def auth_any(request: Request) -> dict:
         result = await auth_human(request)
         if result:
             return {"type": "human"}
-    raise HTTPException(401, "Authentication required")
+    raise ApiError(401, "AUTH_REQUIRED", "Authentication required")
 
 
 async def _get_room_id(db: aiosqlite.Connection, room_name: str) -> str:
     """Resolve room name to ID. Raises 404 if not found."""
     rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
     if not rows:
-        raise HTTPException(404, "Room not found")
+        raise ApiError(404, "NOT_FOUND", "Room not found")
     return dict(rows[0])["id"]
 
 
@@ -258,13 +259,13 @@ async def _require_room_member(db: aiosqlite.Connection, room_name: str, agent_i
     """Resolve room name to ID and verify agent membership. Returns room_id."""
     rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
     if not rows:
-        raise HTTPException(404, "Room not found")
+        raise ApiError(404, "NOT_FOUND", "Room not found")
     room_id = dict(rows[0])["id"]
     member = await db.execute_fetchall(
         "SELECT 1 FROM room_members WHERE room_id = ? AND agent_id = ?", (room_id, agent_id)
     )
     if not member:
-        raise HTTPException(403, "Not a member of this room")
+        raise ApiError(403, "FORBIDDEN", "Not a member of this room")
     return room_id
 
 
@@ -321,6 +322,53 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="chait", lifespan=lifespan)
+
+
+# ---------------------------------------------------------------------------
+# Structured errors (plan 33)
+# ---------------------------------------------------------------------------
+class ApiError(HTTPException):
+    """Structured API error with machine-readable code."""
+
+    def __init__(self, status_code: int, code: str, message: str, field: str | None = None):
+        detail = {"code": code, "message": message}
+        if field:
+            detail["field"] = field
+        super().__init__(status_code=status_code, detail=detail)
+
+
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError):
+    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+
+
+# ---------------------------------------------------------------------------
+# Pydantic request models (plan 36)
+# ---------------------------------------------------------------------------
+class JoinRequest(BaseModel):
+    join_token: str
+    name: str = Field(..., min_length=1)
+    role: str = "agent"
+    card: dict | None = None
+
+
+class MessageRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LENGTH)
+    reply_to: str | None = None
+
+
+class RoomCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    topic: str = ""
+
+
+class StatusUpdateRequest(BaseModel):
+    status: str
+
+
+class DMRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=MAX_MESSAGE_LENGTH)
+
 
 # ---------------------------------------------------------------------------
 # Health
@@ -393,11 +441,21 @@ Use the returned `token` as `Authorization: Bearer sk-...` for all subsequent re
 - Use DMs for private coordination.
 - Update room status when the task state changes.
 
+## Response Format
+
+List endpoints return enveloped responses: `{{"data": [...], "count": N}}`.
+Single-resource endpoints return the object directly.
+
+## Errors
+
+Errors return structured JSON: `{{"error": {{"code": "NOT_FOUND", "message": "Room not found"}}}}`.
+Error codes: `AUTH_REQUIRED`, `AUTH_FAILED`, `TOKEN_EXPIRED`, `NOT_FOUND`, `FORBIDDEN`, `INVALID_FIELD`, `MISSING_FIELD`, `RATE_LIMITED`, `TOO_LARGE`.
+
 ## Rate Limits
 - Messages: 30 per minute per agent
 - DMs: 20 per minute per agent
 - File uploads: 10 per minute per agent
-- Exceeding limits returns HTTP 429.
+- Exceeding limits returns HTTP 429 with code `RATE_LIMITED`.
 """
 
 
@@ -411,24 +469,19 @@ async def get_instructions(request: Request):
 # Join: the only way agents get tokens
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/join")
-async def join_with_token(request: Request):
+async def join_with_token(request: Request, body: JoinRequest):
     """Agent joins a room using a join token. Returns agent auth token."""
     _check_rate(f"join:{request.client.host if request.client else 'unknown'}", max_per_minute=10)
-    body = await request.json()
-    join_token = body.get("join_token", "")
-    name = body.get("name", "")
-    role = body.get("role", "agent")
-    card = body.get("card", {})
-    if not join_token:
-        raise HTTPException(400, "join_token required")
-    if not name:
-        raise HTTPException(400, "name required")
+    join_token = body.join_token
+    name = body.name
+    role = body.role
+    card = body.card or {}
     if role in RESERVED_ROLES:
-        raise HTTPException(400, f"role '{role}' is reserved")
+        raise ApiError(400, "INVALID_FIELD", f"role '{role}' is reserved", field="role")
     db = await get_db()
     rows = await db.execute_fetchall("SELECT * FROM rooms WHERE join_token = ?", (join_token,))
     if not rows:
-        raise HTTPException(403, "Invalid join token")
+        raise ApiError(403, "FORBIDDEN", "Invalid join token")
     room = dict(rows[0])
     # Idempotent join: reuse existing agent if same name in same room
     existing = await db.execute_fetchall(
@@ -479,13 +532,10 @@ async def join_with_token(request: Request):
 # Room creation via master token
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/rooms")
-async def api_create_room(request: Request, _token: str = Depends(auth_master_token)):
+async def api_create_room(body: RoomCreateRequest, _token: str = Depends(auth_master_token)):
     """Create a room using an API token. Returns room info + join_token."""
-    body = await request.json()
-    name = body.get("name", "")
-    topic = body.get("topic", "")
-    if not name:
-        raise HTTPException(400, "name required")
+    name = body.name
+    topic = body.topic
     db = await get_db()
     existing = await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,))
     if existing:
@@ -547,7 +597,8 @@ async def list_rooms(agent: dict = Depends(auth_agent)):
         "SELECT r.id, r.name, r.topic, r.status, r.created_at FROM rooms r JOIN room_members rm ON r.id = rm.room_id WHERE rm.agent_id = ?",
         (agent["id"],),
     )
-    return [dict(r) for r in rows]
+    data = [dict(r) for r in rows]
+    return {"data": data, "count": len(data)}
 
 
 @app.get("/api/v1/rooms/{room_name}")
@@ -574,11 +625,10 @@ async def get_room(room_name: str, agent: dict = Depends(auth_agent)):
 
 
 @app.post("/api/v1/rooms/{room_name}/status")
-async def set_room_status(room_name: str, request: Request, agent: dict = Depends(auth_agent)):
-    body = await request.json()
-    new_status = body.get("status", "")
+async def set_room_status(room_name: str, body: StatusUpdateRequest, agent: dict = Depends(auth_agent)):
+    new_status = body.status
     if new_status not in VALID_ROOM_STATUSES:
-        raise HTTPException(400, f"status must be one of: {', '.join(VALID_ROOM_STATUSES)}")
+        raise ApiError(400, "INVALID_FIELD", f"status must be one of: {', '.join(sorted(VALID_ROOM_STATUSES))}", field="status")
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
     await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
@@ -590,22 +640,15 @@ async def set_room_status(room_name: str, request: Request, agent: dict = Depend
 # Messages
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/rooms/{room_name}/messages")
-async def post_message(room_name: str, request: Request, agent: dict = Depends(auth_agent)):
+async def post_message(room_name: str, body: MessageRequest, agent: dict = Depends(auth_agent)):
     _check_rate(f"msg:{agent['id']}", max_per_minute=30)
-    body = await request.json()
-    text = body.get("text", "")
-    reply_to = body.get("reply_to")
-    if not text:
-        raise HTTPException(400, "text required")
-    if len(text) > MAX_MESSAGE_LENGTH:
-        raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
     msg_id = _uid()
     now = _now()
     await db.execute(
         "INSERT INTO messages (id, room_id, author_id, author_name, author_role, text, reply_to, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (msg_id, room_id, agent["id"], agent["name"], agent["role"], text, reply_to, 0, now),
+        (msg_id, room_id, agent["id"], agent["name"], agent["role"], body.text, body.reply_to, 0, now),
     )
     await db.commit()
     members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
@@ -613,7 +656,7 @@ async def post_message(room_name: str, request: Request, agent: dict = Depends(a
     return {
         "id": msg_id, "room": room_name, "author_id": agent["id"],
         "author_name": agent["name"], "author_role": agent["role"],
-        "text": text, "reply_to": reply_to, "priority": False, "created_at": now,
+        "text": body.text, "reply_to": body.reply_to, "priority": False, "created_at": now,
     }
 
 
@@ -637,36 +680,31 @@ async def get_messages(
             (room_id, limit),
         )
         msgs = list(reversed(msgs))
-    return [_msg_dict(m) for m in msgs]
+    data = [_msg_dict(m) for m in msgs]
+    return {"data": data, "count": len(data)}
 
 
 # ---------------------------------------------------------------------------
 # DMs
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/dm/{target_id}")
-async def send_dm(target_id: str, request: Request, agent: dict = Depends(auth_agent)):
+async def send_dm(target_id: str, body: DMRequest, agent: dict = Depends(auth_agent)):
     _check_rate(f"dm:{agent['id']}", max_per_minute=20)
-    body = await request.json()
-    text = body.get("text", "")
-    if not text:
-        raise HTTPException(400, "text required")
-    if len(text) > MAX_MESSAGE_LENGTH:
-        raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
     target = await db.execute_fetchall("SELECT id FROM agents WHERE id = ?", (target_id,))
     if not target:
-        raise HTTPException(404, "Target agent not found")
+        raise ApiError(404, "NOT_FOUND", "Target agent not found")
     dm_id = _uid()
     now = _now()
     await db.execute(
         "INSERT INTO dms (id, from_id, from_name, to_id, text, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (dm_id, agent["id"], agent["name"], target_id, text, 0, now),
+        (dm_id, agent["id"], agent["name"], target_id, body.text, 0, now),
     )
     await db.commit()
     _notify_agent(target_id)
     return {
         "id": dm_id, "from_id": agent["id"], "from_name": agent["name"],
-        "to_id": target_id, "text": text, "priority": False, "created_at": now,
+        "to_id": target_id, "text": body.text, "priority": False, "created_at": now,
     }
 
 
@@ -689,7 +727,8 @@ async def get_dms(
             (agent["id"], target_id, target_id, agent["id"], limit),
         )
         rows = list(reversed(rows))
-    return [_dm_dict(r) for r in rows]
+    data = [_dm_dict(r) for r in rows]
+    return {"data": data, "count": len(data)}
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +842,7 @@ async def list_documents(room_name: str, agent: dict = Depends(auth_agent)):
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
     docs = await db.execute_fetchall("SELECT * FROM documents WHERE room_id = ? ORDER BY created_at", (room_id,))
-    return [
+    data = [
         {
             "id": dict(d)["id"],
             "filename": dict(d)["filename"],
@@ -813,6 +852,7 @@ async def list_documents(room_name: str, agent: dict = Depends(auth_agent)):
         }
         for d in docs
     ]
+    return {"data": data, "count": len(data)}
 
 
 @app.get("/api/v1/documents/{doc_id}/download")
@@ -820,13 +860,13 @@ async def download_document(doc_id: str, _auth: dict = Depends(auth_any)):
     db = await get_db()
     rows = await db.execute_fetchall("SELECT * FROM documents WHERE id = ?", (doc_id,))
     if not rows:
-        raise HTTPException(404, "Document not found")
+        raise ApiError(404, "NOT_FOUND", "Document not found")
     doc = dict(rows[0])
     room_doc_dir = DOCS_DIR / doc["room_id"]
     for f in room_doc_dir.iterdir():
         if f.name.startswith(doc_id):
             return FileResponse(f, filename=doc["filename"], media_type=doc["content_type"])
-    raise HTTPException(404, "File not found on disk")
+    raise ApiError(404, "NOT_FOUND", "File not found on disk")
 
 
 # ===========================================================================

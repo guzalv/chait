@@ -71,11 +71,11 @@ class TestAuth:
         assert data["id"]
         assert data["name"] == "agent1"
 
-    def test_join_without_name_returns_400(self, client):
+    def test_join_without_name_returns_422(self, client):
         _login(client)
         room = _create_room(client, "test-room")
         r = client.post("/api/v1/join", json={"join_token": room["join_token"], "role": "x"})
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     def test_join_invalid_token_returns_403(self, client):
         r = client.post("/api/v1/join", json={"join_token": "bogus", "name": "agent"})
@@ -171,8 +171,8 @@ class TestRooms:
         room_joined = _create_room(client, "joined")
         _create_room(client, "not-joined")
         agent = _join(client, room_joined["join_token"])
-        rooms = client.get("/api/v1/rooms", headers=_auth(agent["token"])).json()
-        names = [r["name"] for r in rooms]
+        resp = client.get("/api/v1/rooms", headers=_auth(agent["token"])).json()
+        names = [r["name"] for r in resp["data"]]
         assert "joined" in names
         assert "not-joined" not in names
 
@@ -236,8 +236,8 @@ class TestMessages:
         _login(client)
         room = _create_room(client, "r1")
         agent = _join(client, room["join_token"])
-        rooms = client.get("/api/v1/rooms", headers=_auth(agent["token"])).json()
-        assert any(r["name"] == "r1" for r in rooms)
+        resp = client.get("/api/v1/rooms", headers=_auth(agent["token"])).json()
+        assert any(r["name"] == "r1" for r in resp["data"])
 
     def test_get_messages(self, client):
         _login(client)
@@ -246,8 +246,8 @@ class TestMessages:
         h = _auth(agent["token"])
         client.post("/api/v1/rooms/r1/messages", json={"text": "m1"}, headers=h)
         client.post("/api/v1/rooms/r1/messages", json={"text": "m2"}, headers=h)
-        msgs = client.get("/api/v1/rooms/r1/messages", headers=h).json()
-        assert len(msgs) == 2
+        resp = client.get("/api/v1/rooms/r1/messages", headers=h).json()
+        assert resp["count"] == 2
 
     def test_get_messages_since_filter(self, client):
         _login(client)
@@ -255,12 +255,12 @@ class TestMessages:
         agent = _join(client, room["join_token"])
         h = _auth(agent["token"])
         client.post("/api/v1/rooms/r1/messages", json={"text": "old"}, headers=h)
-        ts = client.get("/api/v1/rooms/r1/messages", headers=h).json()[0]["created_at"]
+        ts = client.get("/api/v1/rooms/r1/messages", headers=h).json()["data"][0]["created_at"]
         time.sleep(0.02)
         client.post("/api/v1/rooms/r1/messages", json={"text": "new"}, headers=h)
-        filtered = client.get("/api/v1/rooms/r1/messages", params={"since": ts}, headers=h).json()
-        assert len(filtered) == 1
-        assert filtered[0]["text"] == "new"
+        resp = client.get("/api/v1/rooms/r1/messages", params={"since": ts}, headers=h).json()
+        assert resp["count"] == 1
+        assert resp["data"][0]["text"] == "new"
 
     def test_message_author_info(self, client):
         _login(client)
@@ -268,7 +268,7 @@ class TestMessages:
         agent = _join(client, room["join_token"], name="alice", role="dev")
         h = _auth(agent["token"])
         client.post("/api/v1/rooms/r1/messages", json={"text": "x"}, headers=h)
-        m = client.get("/api/v1/rooms/r1/messages", headers=h).json()[0]
+        m = client.get("/api/v1/rooms/r1/messages", headers=h).json()["data"][0]
         assert m["author_id"] == agent["id"]
         assert m["author_name"] == "alice"
         assert m["author_role"] == "dev"
@@ -309,8 +309,8 @@ class TestDMs:
         a2 = _join(client, room["join_token"], name="a2")
         client.post(f"/api/v1/dm/{a2['id']}", json={"text": "m1"}, headers=_auth(a1["token"]))
         client.post(f"/api/v1/dm/{a1['id']}", json={"text": "m2"}, headers=_auth(a2["token"]))
-        dms = client.get(f"/api/v1/dm/{a2['id']}", headers=_auth(a1["token"])).json()
-        assert len(dms) == 2
+        resp = client.get(f"/api/v1/dm/{a2['id']}", headers=_auth(a1["token"])).json()
+        assert resp["count"] == 2
 
     def test_get_dms_since_filter(self, client):
         _login(client)
@@ -318,12 +318,14 @@ class TestDMs:
         a1 = _join(client, room["join_token"], name="a1")
         a2 = _join(client, room["join_token"], name="a2")
         client.post(f"/api/v1/dm/{a2['id']}", json={"text": "old"}, headers=_auth(a1["token"]))
-        ts = client.get(f"/api/v1/dm/{a2['id']}", headers=_auth(a1["token"])).json()[0]["created_at"]
+        ts = client.get(f"/api/v1/dm/{a2['id']}", headers=_auth(a1["token"])).json()["data"][0]["created_at"]
         time.sleep(0.02)
         client.post(f"/api/v1/dm/{a2['id']}", json={"text": "new"}, headers=_auth(a1["token"]))
-        filtered = client.get(f"/api/v1/dm/{a2['id']}", params={"since": ts}, headers=_auth(a1["token"])).json()
-        assert len(filtered) == 1
-        assert filtered[0]["text"] == "new"
+        resp = client.get(
+            f"/api/v1/dm/{a2['id']}", params={"since": ts}, headers=_auth(a1["token"])
+        ).json()
+        assert resp["count"] == 1
+        assert resp["data"][0]["text"] == "new"
 
 
 # ---------------------------------------------------------------------------
@@ -394,9 +396,9 @@ class TestDocuments:
             files={"file": ("a.txt", b"aaa", "text/plain")},
             headers=h,
         )
-        docs = client.get("/api/v1/rooms/r1/documents", headers=h).json()
-        assert len(docs) == 1
-        assert docs[0]["filename"] == "a.txt"
+        resp = client.get("/api/v1/rooms/r1/documents", headers=h).json()
+        assert resp["count"] == 1
+        assert resp["data"][0]["filename"] == "a.txt"
 
     def test_download_document(self, client):
         _login(client)
@@ -495,7 +497,7 @@ class TestAPICreateRoom:
             json={"topic": "no name"},
             headers={"Authorization": f"Bearer {token}"},
         )
-        assert r.status_code == 400
+        assert r.status_code == 422
 
     def test_create_room_duplicate_returns_existing(self, client):
         _login(client)
