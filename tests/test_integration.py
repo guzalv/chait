@@ -32,28 +32,32 @@ def client(tmp_path):
         yield c
 
 
-def _register(client, name="agent", role="agent", card=None):
-    body = {"name": name, "role": role}
-    if card is not None:
+def _login(client):
+    r = client.post(
+        "/login",
+        data={"user": "admin", "password": "changeme"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+
+
+def _create_room(client, name, topic=""):
+    r = client.post("/ui/api/rooms", json={"name": name, "topic": topic})
+    assert r.status_code == 200
+    return r.json()
+
+
+def _join(client, join_token, name="Agent", role="agent", card=None):
+    body = {"join_token": join_token, "name": name, "role": role}
+    if card:
         body["card"] = card
-    r = client.post("/api/v1/register", json=body)
+    r = client.post("/api/v1/join", json=body)
     assert r.status_code == 200
     return r.json()
 
 
 def _auth(token):
     return {"Authorization": f"Bearer {token}"}
-
-
-def _room(client, name, topic=""):
-    r = client.post("/api/v1/rooms", json={"name": name, "topic": topic})
-    assert r.status_code == 200
-    return r.json()
-
-
-def _join(client, room, token):
-    r = client.post(f"/api/v1/rooms/{room}/join", headers=_auth(token))
-    assert r.status_code == 200
 
 
 def _post(client, room, text, token):
@@ -72,26 +76,15 @@ def _unread(client, token, **params):
     return r.json()
 
 
-def _login(client):
-    r = client.post(
-        "/login",
-        data={"user": "admin", "password": "changeme"},
-        follow_redirects=False,
-    )
-    assert r.status_code == 303
-
-
 # ---------------------------------------------------------------------------
 # 1. Multi-agent room conversation
 # ---------------------------------------------------------------------------
 def test_multi_agent_room_conversation(client):
-    a = _register(client, "Alice", "designer", {"skills": ["ui"]})
-    b = _register(client, "Bob", "developer", {"skills": ["go"]})
-    c = _register(client, "Carol", "tester", {"skills": ["pytest"]})
-
-    _room(client, "project-x")
-    for ag in [a, b, c]:
-        _join(client, "project-x", ag["token"])
+    _login(client)
+    room = _create_room(client, "project-x")
+    a = _join(client, room["join_token"], "Alice", "designer", {"skills": ["ui"]})
+    b = _join(client, room["join_token"], "Bob", "developer", {"skills": ["go"]})
+    c = _join(client, room["join_token"], "Carol", "tester", {"skills": ["pytest"]})
 
     # A posts
     _post(client, "project-x", "Here are the mockups", a["token"])
@@ -126,11 +119,10 @@ def test_multi_agent_room_conversation(client):
 # 2. Long-poll notification delivery
 # ---------------------------------------------------------------------------
 def test_long_poll_notification_delivery(client):
-    a = _register(client, "Alice")
-    b = _register(client, "Bob")
-    _room(client, "poll-room")
-    _join(client, "poll-room", a["token"])
-    _join(client, "poll-room", b["token"])
+    _login(client)
+    room = _create_room(client, "poll-room")
+    a = _join(client, room["join_token"], "Alice")
+    b = _join(client, room["join_token"], "Bob")
 
     result = {}
 
@@ -162,17 +154,15 @@ def test_long_poll_notification_delivery(client):
 # 3. Human god-mode priority
 # ---------------------------------------------------------------------------
 def test_human_god_mode_priority(client):
-    a = _register(client, "Alice", "dev")
-    b = _register(client, "Bob", "dev")
-    _room(client, "priority-room")
-    _join(client, "priority-room", a["token"])
-    _join(client, "priority-room", b["token"])
+    _login(client)
+    room = _create_room(client, "priority-room")
+    a = _join(client, room["join_token"], "Alice", "dev")
+    b = _join(client, room["join_token"], "Bob", "dev")
 
     # Agent A posts normal message
     _post(client, "priority-room", "agent message", a["token"])
 
-    # Human posts priority message (requires session cookie)
-    _login(client)
+    # Human posts priority message (session cookie already set by _login)
     r = client.post(
         "/ui/api/rooms/priority-room/messages", json={"text": "urgent from human"}
     )
@@ -196,9 +186,11 @@ def test_human_god_mode_priority(client):
 # 4. DM routing
 # ---------------------------------------------------------------------------
 def test_dm_routing(client):
-    a = _register(client, "Alice")
-    b = _register(client, "Bob")
-    c = _register(client, "Carol")
+    _login(client)
+    room = _create_room(client, "dm-room")
+    a = _join(client, room["join_token"], "Alice")
+    b = _join(client, room["join_token"], "Bob")
+    c = _join(client, room["join_token"], "Carol")
 
     # A sends DM to B
     r = client.post(
@@ -229,9 +221,10 @@ def test_dm_routing(client):
 # 5. Room lifecycle (status transitions)
 # ---------------------------------------------------------------------------
 def test_room_lifecycle_status_transitions(client):
-    agent = _register(client)
-    data = _room(client, "lifecycle-room")
-    assert data["status"] == "active"
+    _login(client)
+    room = _create_room(client, "lifecycle-room")
+    assert room["status"] == "active"
+    agent = _join(client, room["join_token"])
     h = _auth(agent["token"])
 
     transitions = ["waiting-for-input", "active", "completed"]
@@ -243,9 +236,8 @@ def test_room_lifecycle_status_transitions(client):
         assert r.json()["status"] == status
 
         # Verify via GET
-        _join(client, "lifecycle-room", agent["token"])
-        room = client.get("/api/v1/rooms/lifecycle-room", headers=h).json()
-        assert room["status"] == status
+        room_data = client.get("/api/v1/rooms/lifecycle-room", headers=h).json()
+        assert room_data["status"] == status
 
     # Invalid status → 400
     r = client.post(
@@ -264,14 +256,14 @@ def test_agent_card_visibility(client):
         "tools": ["pytest", "webpack"],
         "constraints": ["no-root-access"],
     }
-    agent = _register(client, "CardAgent", "engineer", card)
-    _room(client, "card-room")
-    _join(client, "card-room", agent["token"])
+    _login(client)
+    room = _create_room(client, "card-room")
+    agent = _join(client, room["join_token"], "CardAgent", "engineer", card)
     h = _auth(agent["token"])
 
     # Card present in room member info
-    room = client.get("/api/v1/rooms/card-room", headers=h).json()
-    member = room["members"][0]
+    room_data = client.get("/api/v1/rooms/card-room", headers=h).json()
+    member = room_data["members"][0]
     assert member["card"] == card
 
     # Update card
@@ -280,24 +272,22 @@ def test_agent_card_visibility(client):
     assert r.status_code == 200
 
     # Updated card in room
-    room = client.get("/api/v1/rooms/card-room", headers=h).json()
-    assert room["members"][0]["card"] == new_card
+    room_data = client.get("/api/v1/rooms/card-room", headers=h).json()
+    assert room_data["members"][0]["card"] == new_card
 
-    # Card in agents list
-    agents = client.get("/api/v1/agents").json()
-    match = next(a for a in agents if a["id"] == agent["id"])
-    assert match["card"] == new_card
+    # Verify via /me endpoint
+    me = client.get("/api/v1/me", headers=h).json()
+    assert me["card"] == new_card
 
 
 # ---------------------------------------------------------------------------
 # 7. Document sharing
 # ---------------------------------------------------------------------------
 def test_document_sharing(client):
-    a = _register(client, "Alice")
-    b = _register(client, "Bob")
-    _room(client, "docs-room")
-    _join(client, "docs-room", a["token"])
-    _join(client, "docs-room", b["token"])
+    _login(client)
+    room = _create_room(client, "docs-room")
+    a = _join(client, room["join_token"], "Alice")
+    b = _join(client, room["join_token"], "Bob")
 
     content = b"# Design Doc\n\nWidget API specification v1"
     r = client.post(
@@ -328,10 +318,9 @@ def test_document_sharing(client):
 # 8. Concurrent message ordering
 # ---------------------------------------------------------------------------
 def test_concurrent_message_ordering(client):
-    agents = [_register(client, f"agent-{i}") for i in range(5)]
-    _room(client, "concurrent")
-    for a in agents:
-        _join(client, "concurrent", a["token"])
+    _login(client)
+    room = _create_room(client, "concurrent")
+    agents = [_join(client, room["join_token"], f"agent-{i}") for i in range(5)]
 
     errors = []
 
@@ -365,8 +354,9 @@ def test_concurrent_message_ordering(client):
 # 9. Human DM to agent
 # ---------------------------------------------------------------------------
 def test_human_dm_to_agent(client):
-    agent = _register(client, "DevAgent", "developer")
     _login(client)
+    room = _create_room(client, "dm-room")
+    agent = _join(client, room["join_token"], "DevAgent", "developer")
 
     r = client.post(
         f"/ui/api/dm/{agent['id']}", json={"text": "please fix the bug"}
@@ -388,28 +378,20 @@ def test_human_dm_to_agent(client):
 # 10. Full workflow simulation
 # ---------------------------------------------------------------------------
 def test_full_workflow_simulation(client):
-    pm = _register(
-        client,
-        "PM",
-        "product-manager",
+    _login(client)
+    room = _create_room(client, "sprint-task", topic="Build widget API")
+    pm = _join(
+        client, room["join_token"], "PM", "product-manager",
         {"description": "Product planning", "skills": ["requirements", "coordination"]},
     )
-    lead = _register(
-        client,
-        "Lead",
-        "tech-lead",
+    lead = _join(
+        client, room["join_token"], "Lead", "tech-lead",
         {"description": "Architecture", "skills": ["design", "code-review"]},
     )
-    dev = _register(
-        client,
-        "Dev",
-        "developer",
+    dev = _join(
+        client, room["join_token"], "Dev", "developer",
         {"description": "Implementation", "skills": ["go", "testing"]},
     )
-
-    _room(client, "sprint-task", topic="Build widget API")
-    for ag in [pm, lead, dev]:
-        _join(client, "sprint-task", ag["token"])
 
     # PM posts requirements
     _post(client, "sprint-task", "Build widget CRUD API with validation and tests.", pm["token"])
@@ -472,21 +454,20 @@ def test_full_workflow_simulation(client):
     assert len(docs) == 1
     assert docs[0]["filename"] == "api-design.md"
 
-    room = client.get(
+    room_data = client.get(
         "/api/v1/rooms/sprint-task", headers=_auth(pm["token"])
     ).json()
-    assert room["status"] == "completed"
-    assert {m["name"] for m in room["members"]} == {"PM", "Lead", "Dev"}
+    assert room_data["status"] == "completed"
+    assert {m["name"] for m in room_data["members"]} == {"PM", "Lead", "Dev"}
 
 
 # ---------------------------------------------------------------------------
 # 11. Human document upload visible to agents
 # ---------------------------------------------------------------------------
 def test_human_document_upload_visible_to_agents(client):
-    agent = _register(client, "DocReader")
-    _room(client, "human-docs")
-    _join(client, "human-docs", agent["token"])
     _login(client)
+    room = _create_room(client, "human-docs")
+    agent = _join(client, room["join_token"], "DocReader")
 
     content = b"Human-uploaded context for the task."
     r = client.post(
@@ -516,14 +497,13 @@ def test_human_document_upload_visible_to_agents(client):
 # ---------------------------------------------------------------------------
 def test_document_upload_notifies_via_unread(client):
     """When agent A uploads a doc, agent B sees it in /me/unread."""
-    a = _register(client, "Uploader")
-    b = _register(client, "Watcher")
-    _room(client, "doc-notify")
-    _join(client, "doc-notify", a["token"])
-    _join(client, "doc-notify", b["token"])
+    _login(client)
+    room = _create_room(client, "doc-notify")
+    a = _join(client, room["join_token"], "Uploader")
+    b = _join(client, room["join_token"], "Watcher")
 
     # Record timestamp before upload
-    import time; time.sleep(0.01)
+    time.sleep(0.01)
     before = datetime.now(timezone.utc).isoformat()
 
     # A uploads a document
@@ -553,11 +533,10 @@ def test_document_upload_notifies_via_unread(client):
 
 def test_document_upload_wakes_long_poll(client):
     """Document upload should wake a long-polling agent."""
-    a = _register(client, "DocPoster")
-    b = _register(client, "DocWaiter")
-    _room(client, "doc-wake")
-    _join(client, "doc-wake", a["token"])
-    _join(client, "doc-wake", b["token"])
+    _login(client)
+    room = _create_room(client, "doc-wake")
+    a = _join(client, room["join_token"], "DocPoster")
+    b = _join(client, room["join_token"], "DocWaiter")
 
     result = {"unread": None, "elapsed": None}
 

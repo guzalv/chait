@@ -15,15 +15,13 @@ from fastapi import (
     Depends,
     FastAPI,
     File,
-    Form,
     HTTPException,
     Query,
     Request,
     Response,
     UploadFile,
-    status,
 )
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 # ---------------------------------------------------------------------------
 # Config
@@ -40,14 +38,12 @@ _unread_events: dict[str, asyncio.Event] = {}
 
 
 def _notify_agent(agent_id: str):
-    """Signal that agent_id has new messages."""
     ev = _unread_events.get(agent_id)
     if ev:
         ev.set()
 
 
 def _notify_room_members(db_rows, exclude: str = ""):
-    """Notify all members of a room (from pre-fetched rows)."""
     for r in db_rows:
         aid = dict(r)["agent_id"]
         if aid != exclude:
@@ -78,6 +74,7 @@ async def init_db():
             role TEXT NOT NULL DEFAULT 'agent',
             token TEXT NOT NULL UNIQUE,
             card TEXT DEFAULT '{}',
+            room_id TEXT,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS rooms (
@@ -85,6 +82,7 @@ async def init_db():
             name TEXT NOT NULL UNIQUE,
             topic TEXT DEFAULT '',
             status TEXT NOT NULL DEFAULT 'active',
+            join_token TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS room_members (
@@ -130,16 +128,17 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_dms_to ON dms(to_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_dms_from ON dms(from_id, created_at);
     """)
-    # Migrate: add card column if missing
-    try:
-        await _db.execute("SELECT card FROM agents LIMIT 1")
-    except Exception:
-        await _db.execute("ALTER TABLE agents ADD COLUMN card TEXT DEFAULT '{}'")
-    # Migrate: add status column if missing
-    try:
-        await _db.execute("SELECT status FROM rooms LIMIT 1")
-    except Exception:
-        await _db.execute("ALTER TABLE rooms ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+    # Migrations for existing DBs
+    for col, tbl, default in [
+        ("card", "agents", "'{}'"),
+        ("room_id", "agents", "NULL"),
+        ("status", "rooms", "'active'"),
+        ("join_token", "rooms", "''"),
+    ]:
+        try:
+            await _db.execute(f"SELECT {col} FROM {tbl} LIMIT 1")
+        except Exception:
+            await _db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT DEFAULT {default}")
     await _db.commit()
 
 
@@ -204,6 +203,13 @@ def _dm_dict(d) -> dict:
     }
 
 
+def _parse_card(raw) -> dict:
+    try:
+        return json.loads(raw or "{}")
+    except Exception:
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
@@ -227,24 +233,7 @@ You are connected to a chait collaboration server.
 **Base URL**: {base_url}/api/v1
 **Auth**: `Authorization: Bearer <token>` header on every request.
 
-## First: register yourself
-
-Before doing anything else, register with your capabilities:
-
-```
-POST /api/v1/register
-Body: {{
-  "name": "Your Name",
-  "role": "your-role",
-  "card": {{
-    "description": "Brief description of what you can do",
-    "skills": ["list", "of", "capabilities"],
-    "tools": ["curl", "python", "go build", ...],
-    "constraints": ["any limitations"]
-  }}
-}}
-```
-Response includes your `id` and `token`. Use the token for all subsequent requests.
+Your token was issued when you joined the room. Use it for all requests.
 
 ## Endpoints
 
@@ -255,7 +244,6 @@ Response includes your `id` and `token`. Use the token for all subsequent reques
 ### Rooms
 - `GET  /api/v1/rooms` — List rooms you're in
 - `GET  /api/v1/rooms/{{room}}` — Room details + members + their cards
-- `POST /api/v1/rooms/{{room}}/join`
 - `POST /api/v1/rooms/{{room}}/status` — Set room status. Body: `{{"status": "active|waiting-for-input|completed|blocked"}}`
 
 ### Documents
@@ -267,8 +255,11 @@ Response includes your `id` and `token`. Use the token for all subsequent reques
 - `POST /api/v1/dm/{{agent_id}}` — Body: `{{"text": "..."}}`
 - `GET  /api/v1/dm/{{agent_id}}?since=<iso_timestamp>`
 
+### Identity
+- `GET  /api/v1/me` — Your identity + card
+- `PUT  /api/v1/me/card` — Update your card. Body: `{{"description": "...", "skills": [...]}}`
+
 ### Status (long-polling)
-- `GET /api/v1/me` — Your identity + card
 - `GET /api/v1/me/unread?wait=60` — **Long-poll**: blocks up to `wait` seconds until new messages arrive. Returns immediately if messages exist. Call this in a loop.
 
 ## Behavior
@@ -287,52 +278,52 @@ async def get_instructions(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Agent registration
+# Join: the only way agents get tokens
 # ---------------------------------------------------------------------------
-@app.post("/api/v1/register")
-async def register_agent(request: Request):
-    """Register a new agent with its card (capabilities)."""
+@app.post("/api/v1/join")
+async def join_with_token(request: Request):
+    """Agent joins a room using a join token. Returns agent auth token."""
     body = await request.json()
-    name = body.get("name")
+    join_token = body.get("join_token", "")
+    name = body.get("name", "")
     role = body.get("role", "agent")
     card = body.get("card", {})
+    if not join_token:
+        raise HTTPException(400, "join_token required")
     if not name:
         raise HTTPException(400, "name required")
     db = await get_db()
+    rows = await db.execute_fetchall("SELECT * FROM rooms WHERE join_token = ?", (join_token,))
+    if not rows:
+        raise HTTPException(403, "Invalid join token")
+    room = dict(rows[0])
     agent_id = _uid()
-    token = f"sk-{secrets.token_hex(24)}"
+    agent_token = f"sk-{secrets.token_hex(24)}"
     await db.execute(
-        "INSERT INTO agents (id, name, role, token, card, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (agent_id, name, role, token, json.dumps(card), _now()),
+        "INSERT INTO agents (id, name, role, token, card, room_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now()),
+    )
+    await db.execute(
+        "INSERT OR IGNORE INTO room_members (room_id, agent_id, joined_at) VALUES (?, ?, ?)",
+        (room["id"], agent_id, _now()),
     )
     await db.commit()
-    return {"id": agent_id, "name": name, "role": role, "token": token, "card": card}
+    return {
+        "id": agent_id, "name": name, "role": role, "token": agent_token,
+        "room": room["name"], "card": card,
+    }
 
 
-# Keep old endpoint as alias
-@app.post("/api/v1/agents")
-async def create_agent(request: Request):
-    return await register_agent(request)
-
-
-@app.get("/api/v1/agents")
-async def list_agents():
-    db = await get_db()
-    rows = await db.execute_fetchall("SELECT id, name, role, card, created_at FROM agents")
-    result = []
-    for r in rows:
-        d = dict(r)
-        try:
-            d["card"] = json.loads(d.get("card") or "{}")
-        except Exception:
-            d["card"] = {}
-        result.append(d)
-    return result
+# ---------------------------------------------------------------------------
+# Agent identity
+# ---------------------------------------------------------------------------
+@app.get("/api/v1/me")
+async def me_endpoint(agent: dict = Depends(auth_agent)):
+    return {"id": agent["id"], "name": agent["name"], "role": agent["role"], "card": _parse_card(agent.get("card"))}
 
 
 @app.put("/api/v1/me/card")
 async def update_card(request: Request, agent: dict = Depends(auth_agent)):
-    """Update agent's card."""
     card = await request.json()
     db = await get_db()
     await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
@@ -346,31 +337,11 @@ async def update_card(request: Request, agent: dict = Depends(auth_agent)):
 VALID_ROOM_STATUSES = {"active", "waiting-for-input", "completed", "blocked"}
 
 
-@app.post("/api/v1/rooms")
-async def create_room(request: Request):
-    body = await request.json()
-    name = body.get("name")
-    topic = body.get("topic", "")
-    if not name:
-        raise HTTPException(400, "name required")
-    db = await get_db()
-    existing = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (name,))
-    if existing:
-        return {"id": dict(existing[0])["id"], "name": name, "existing": True}
-    room_id = _uid()
-    await db.execute(
-        "INSERT INTO rooms (id, name, topic, status, created_at) VALUES (?, ?, ?, 'active', ?)",
-        (room_id, name, topic, _now()),
-    )
-    await db.commit()
-    return {"id": room_id, "name": name, "topic": topic, "status": "active"}
-
-
 @app.get("/api/v1/rooms")
 async def list_rooms(agent: dict = Depends(auth_agent)):
     db = await get_db()
     rows = await db.execute_fetchall(
-        "SELECT r.* FROM rooms r JOIN room_members rm ON r.id = rm.room_id WHERE rm.agent_id = ?",
+        "SELECT r.id, r.name, r.topic, r.status, r.created_at FROM rooms r JOIN room_members rm ON r.id = rm.room_id WHERE rm.agent_id = ?",
         (agent["id"],),
     )
     return [dict(r) for r in rows]
@@ -383,35 +354,13 @@ async def get_room(room_name: str, agent: dict = Depends(auth_agent)):
     if not rows:
         raise HTTPException(404, "Room not found")
     room = dict(rows[0])
+    room.pop("join_token", None)  # never expose join_token to agents
     members = await db.execute_fetchall(
         "SELECT a.id, a.name, a.role, a.card FROM agents a JOIN room_members rm ON a.id = rm.agent_id WHERE rm.room_id = ?",
         (room["id"],),
     )
-    result_members = []
-    for m in members:
-        md = dict(m)
-        try:
-            md["card"] = json.loads(md.get("card") or "{}")
-        except Exception:
-            md["card"] = {}
-        result_members.append(md)
-    room["members"] = result_members
+    room["members"] = [{"id": dict(m)["id"], "name": dict(m)["name"], "role": dict(m)["role"], "card": _parse_card(dict(m).get("card"))} for m in members]
     return room
-
-
-@app.post("/api/v1/rooms/{room_name}/join")
-async def join_room(room_name: str, agent: dict = Depends(auth_agent)):
-    db = await get_db()
-    rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
-    if not rows:
-        raise HTTPException(404, "Room not found")
-    room_id = dict(rows[0])["id"]
-    await db.execute(
-        "INSERT OR IGNORE INTO room_members (room_id, agent_id, joined_at) VALUES (?, ?, ?)",
-        (room_id, agent["id"], _now()),
-    )
-    await db.commit()
-    return {"joined": room_name}
 
 
 @app.post("/api/v1/rooms/{room_name}/status")
@@ -424,8 +373,7 @@ async def set_room_status(room_name: str, request: Request, agent: dict = Depend
     rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
     if not rows:
         raise HTTPException(404, "Room not found")
-    room_id = dict(rows[0])["id"]
-    await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
+    await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, dict(rows[0])["id"]))
     await db.commit()
     return {"room": room_name, "status": new_status}
 
@@ -445,10 +393,6 @@ async def post_message(room_name: str, request: Request, agent: dict = Depends(a
     if not rows:
         raise HTTPException(404, "Room not found")
     room_id = dict(rows[0])["id"]
-    await db.execute(
-        "INSERT OR IGNORE INTO room_members (room_id, agent_id, joined_at) VALUES (?, ?, ?)",
-        (room_id, agent["id"], _now()),
-    )
     msg_id = _uid()
     now = _now()
     await db.execute(
@@ -456,7 +400,6 @@ async def post_message(room_name: str, request: Request, agent: dict = Depends(a
         (msg_id, room_id, agent["id"], agent["name"], agent["role"], text, reply_to, 0, now),
     )
     await db.commit()
-    # Notify room members
     members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
     return {"id": msg_id, "room": room_name, "author_name": agent["name"], "text": text, "created_at": now}
@@ -529,23 +472,12 @@ async def get_dms(
 # ---------------------------------------------------------------------------
 # Unread with long-polling
 # ---------------------------------------------------------------------------
-@app.get("/api/v1/me")
-async def me_endpoint(agent: dict = Depends(auth_agent)):
-    card = {}
-    try:
-        card = json.loads(agent.get("card") or "{}")
-    except Exception:
-        pass
-    return {"id": agent["id"], "name": agent["name"], "role": agent["role"], "card": card}
-
-
 @app.get("/api/v1/me/unread")
 async def unread(
     agent: dict = Depends(auth_agent),
     since: Optional[str] = None,
     wait: int = Query(default=0, le=120),
 ):
-    """Long-poll for unread messages. Blocks up to `wait` seconds if nothing new."""
     db = await get_db()
     if not since:
         since = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
@@ -567,7 +499,6 @@ async def unread(
 
     room_msgs, dm_msgs, new_docs = await _fetch()
 
-    # Long-poll: if nothing and wait > 0, block until notified or timeout
     if not room_msgs and not dm_msgs and not new_docs and wait > 0:
         ev = asyncio.Event()
         _unread_events[agent["id"]] = ev
@@ -619,7 +550,6 @@ async def upload_document(room_name: str, file: UploadFile = File(...), agent: d
         (doc_id, room_id, file.filename, file.content_type, agent["id"], len(content), _now()),
     )
     await db.commit()
-    # Notify room members about new document
     members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
     return {"id": doc_id, "filename": file.filename, "size": len(content)}
@@ -689,7 +619,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f0;display:flex;height:100vh}
 #sidebar{width:250px;background:#1e293b;border-right:1px solid #334155;display:flex;flex-direction:column;flex-shrink:0}
-#sidebar h1{padding:1rem;font-size:1.25rem;color:#38bdf8;border-bottom:1px solid #334155}
+#sidebar h1{padding:1rem;font-size:1.25rem;color:#38bdf8;border-bottom:1px solid #334155;display:flex;justify-content:space-between;align-items:center}
+#sidebar h1 button{font-size:.7rem;padding:.25rem .5rem}
 #rooms-list{flex:1;overflow-y:auto;padding:.5rem}
 .room-item{padding:.5rem .75rem;border-radius:4px;cursor:pointer;font-size:.85rem;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center}
 .room-item:hover{background:#334155}
@@ -723,24 +654,24 @@ body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f
 .doc-item{padding:.2rem 0}
 .doc-item a{color:#38bdf8;text-decoration:none;font-size:.75rem}
 #no-room{display:flex;align-items:center;justify-content:center;flex:1;color:#64748b;font-size:1rem}
-#dm-modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
-#dm-modal .dm-box{background:#1e293b;padding:1.5rem;border-radius:8px;width:400px}
-#dm-modal h3{color:#38bdf8;margin-bottom:.75rem}
-#dm-modal textarea{width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:.5rem;margin-bottom:.5rem;font-family:inherit;font-size:.85rem;resize:none}
-#dm-modal .btns{display:flex;gap:.5rem;justify-content:flex-end}
-.upload-area{margin-top:.5rem}
-.upload-area input[type=file]{font-size:.7rem;color:#94a3b8}
+.modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
+.modal .modal-box{background:#1e293b;padding:1.5rem;border-radius:8px;width:420px}
+.modal h3{color:#38bdf8;margin-bottom:.75rem}
+.modal input,.modal textarea{width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:.5rem;margin-bottom:.5rem;font-family:inherit;font-size:.85rem}
+.modal textarea{resize:none}
+.modal .btns{display:flex;gap:.5rem;justify-content:flex-end}
+.token-display{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:.5rem;font-family:monospace;font-size:.8rem;color:#22c55e;word-break:break-all;margin:.5rem 0;cursor:pointer;user-select:all}
 </style></head><body>
 <div id="sidebar">
-  <h1>chait</h1>
+  <h1>chait <button class="btn btn-sm" onclick="openNewRoom()">+ Room</button></h1>
   <div id="rooms-list"></div>
 </div>
 <div id="main">
-  <div id="no-room">Select a room</div>
+  <div id="no-room">Select a room or create one</div>
   <div id="room-view" style="display:none;flex:1;flex-direction:column">
     <div id="room-header">
       <span><span id="room-title"></span> <span id="room-status-badge" class="room-status"></span></span>
-      <span class="info" id="room-topic"></span>
+      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button></span>
     </div>
     <div id="messages"></div>
     <div id="input-area">
@@ -756,8 +687,35 @@ body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f
   <div><h3>Room Members</h3><div id="agents-list"></div></div>
   <div><h3>Documents</h3><div id="docs-list"></div></div>
 </div>
-<div id="dm-modal">
-  <div class="dm-box">
+<!-- New Room modal -->
+<div id="new-room-modal" class="modal">
+  <div class="modal-box">
+    <h3>New Room</h3>
+    <input id="new-room-name" placeholder="Room name (e.g. rox-12345)">
+    <input id="new-room-topic" placeholder="Topic / task description">
+    <div id="new-room-result" style="display:none">
+      <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Join token (copy this for agents):</div>
+      <div class="token-display" id="new-room-token" onclick="navigator.clipboard.writeText(this.textContent)"></div>
+      <div style="color:#64748b;font-size:.65rem">Click token to copy</div>
+    </div>
+    <div class="btns">
+      <button class="btn btn-sm" style="background:#475569" onclick="closeNewRoom()">Close</button>
+      <button class="btn btn-sm" id="create-room-btn" onclick="createRoom()">Create</button>
+    </div>
+  </div>
+</div>
+<!-- Token display modal -->
+<div id="token-modal" class="modal">
+  <div class="modal-box">
+    <h3>Join Token for <span id="token-room-name"></span></h3>
+    <div class="token-display" id="token-display" onclick="navigator.clipboard.writeText(this.textContent)"></div>
+    <div style="color:#64748b;font-size:.65rem;margin-bottom:.75rem">Click to copy. Give this to agents so they can join this room.</div>
+    <div class="btns"><button class="btn btn-sm" onclick="document.getElementById('token-modal').style.display='none'">Close</button></div>
+  </div>
+</div>
+<!-- DM modal -->
+<div id="dm-modal" class="modal">
+  <div class="modal-box">
     <h3>DM to <span id="dm-target-name"></span></h3>
     <textarea id="dm-input" rows="3" placeholder="Private message..."></textarea>
     <div class="btns">
@@ -839,6 +797,27 @@ async function sendDM(){
   await fetch(`/ui/api/dm/${dmTargetId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
   document.getElementById('dm-input').value='';closeDM();
 }
+function openNewRoom(){document.getElementById('new-room-modal').style.display='flex';document.getElementById('new-room-name').focus();document.getElementById('new-room-result').style.display='none';document.getElementById('create-room-btn').style.display=''}
+function closeNewRoom(){document.getElementById('new-room-modal').style.display='none'}
+async function createRoom(){
+  const name=document.getElementById('new-room-name').value.trim();
+  const topic=document.getElementById('new-room-topic').value.trim();
+  if(!name)return;
+  const r=await fetch('/ui/api/rooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,topic})});
+  const data=await r.json();
+  document.getElementById('new-room-token').textContent=data.join_token;
+  document.getElementById('new-room-result').style.display='block';
+  document.getElementById('create-room-btn').style.display='none';
+  loadRooms();
+}
+async function showJoinToken(){
+  if(!currentRoom)return;
+  const r=await api(`/ui/api/rooms/${currentRoom}/token`);
+  if(!r)return;
+  document.getElementById('token-room-name').textContent=currentRoom;
+  document.getElementById('token-display').textContent=r.join_token;
+  document.getElementById('token-modal').style.display='flex';
+}
 document.getElementById('msg-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});
 loadRooms();setInterval(loadRooms,10000);
 </script></body></html>"""
@@ -855,11 +834,42 @@ async def dashboard(request: Request):
 # ---------------------------------------------------------------------------
 # UI API (human god-mode endpoints)
 # ---------------------------------------------------------------------------
+@app.post("/ui/api/rooms")
+async def ui_create_room(request: Request, session: str = Depends(require_human)):
+    """Human creates a room. Returns join token."""
+    body = await request.json()
+    name = body.get("name", "")
+    topic = body.get("topic", "")
+    if not name:
+        raise HTTPException(400, "name required")
+    db = await get_db()
+    existing = await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,))
+    if existing:
+        return {"id": dict(existing[0])["id"], "name": name, "join_token": dict(existing[0])["join_token"], "existing": True}
+    room_id = _uid()
+    join_token = f"chait-{secrets.token_hex(16)}"
+    await db.execute(
+        "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
+        (room_id, name, topic, join_token, _now()),
+    )
+    await db.commit()
+    return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
+
+
 @app.get("/ui/api/rooms")
 async def ui_rooms(session: str = Depends(require_human)):
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT * FROM rooms ORDER BY created_at")
+    rows = await db.execute_fetchall("SELECT id, name, topic, status, created_at FROM rooms ORDER BY created_at")
     return [dict(r) for r in rows]
+
+
+@app.get("/ui/api/rooms/{room_name}/token")
+async def ui_room_token(room_name: str, session: str = Depends(require_human)):
+    db = await get_db()
+    rows = await db.execute_fetchall("SELECT join_token FROM rooms WHERE name = ?", (room_name,))
+    if not rows:
+        raise HTTPException(404)
+    return {"join_token": dict(rows[0])["join_token"]}
 
 
 @app.get("/ui/api/rooms/{room_name}/messages")
@@ -884,19 +894,12 @@ async def ui_room_details(room_name: str, session: str = Depends(require_human))
     if not rows:
         raise HTTPException(404)
     room = dict(rows[0])
+    room.pop("join_token", None)
     members = await db.execute_fetchall(
         "SELECT a.id, a.name, a.role, a.card FROM agents a JOIN room_members rm ON a.id = rm.agent_id WHERE rm.room_id = ?",
         (room["id"],),
     )
-    result = []
-    for m in members:
-        md = dict(m)
-        try:
-            md["card"] = json.loads(md.get("card") or "{}")
-        except Exception:
-            md["card"] = {}
-        result.append(md)
-    room["members"] = result
+    room["members"] = [{"id": dict(m)["id"], "name": dict(m)["name"], "role": dict(m)["role"], "card": _parse_card(dict(m).get("card"))} for m in members]
     return room
 
 
@@ -929,7 +932,6 @@ async def ui_send_message(room_name: str, request: Request, session: str = Depen
         (msg_id, room_id, "human", "Human", "god", text, None, 1, now),
     )
     await db.commit()
-    # Notify all room members
     members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
     return {"id": msg_id, "room": room_name, "text": text, "priority": True}
@@ -952,7 +954,6 @@ async def ui_upload_document(room_name: str, file: UploadFile = File(...), sessi
         (doc_id, room_id, file.filename, file.content_type, "human", len(content), _now()),
     )
     await db.commit()
-    # Notify room members about new document
     members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
     return {"id": doc_id, "filename": file.filename, "size": len(content)}

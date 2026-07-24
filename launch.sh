@@ -9,9 +9,9 @@
 #   ./launch.sh --task "..." --context "~/sw/myproject"
 #
 # Options:
+#   --token TOKEN      Join token from the chait UI (required)
 #   --task TEXT         Task description (prompted if omitted)
 #   --task-file FILE   Read task description from file (for long/multiline tasks)
-#   --room NAME        Chat room name (default: auto-generated from task)
 #   --server URL       Chait server URL (default: http://localhost:3100)
 #   --team SPEC        Comma-separated roles or role:name pairs
 #                      (default: pm,lead,principal,senior)
@@ -27,9 +27,9 @@ set -euo pipefail
 # Defaults
 # ---------------------------------------------------------------------------
 SERVER="${CHAIT_SERVER:-http://localhost:3100}"
+JOIN_TOKEN=""
 TEAM_SPEC=""
 TASK=""
-ROOM=""
 CONTEXT="$(pwd)"
 MODEL="sonnet"
 RUNNER=""
@@ -64,9 +64,9 @@ declare -A ROLE_CARDS=(
 # ---------------------------------------------------------------------------
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --token)    JOIN_TOKEN="$2"; shift 2 ;;
     --task)     TASK="$2"; shift 2 ;;
     --task-file) TASK="$(cat "$2")"; shift 2 ;;
-    --room)     ROOM="$2"; shift 2 ;;
     --server)   SERVER="$2"; shift 2 ;;
     --team)     TEAM_SPEC="$2"; shift 2 ;;
     --context)  CONTEXT="$2"; shift 2 ;;
@@ -83,18 +83,31 @@ done
 # ---------------------------------------------------------------------------
 # Interactive prompts for missing values
 # ---------------------------------------------------------------------------
-if [[ -z "$TASK" ]]; then
+if [[ -z "$JOIN_TOKEN" ]]; then
   echo "=== chait — team launcher ==="
+  echo ""
+  echo "Create a room in the chait web UI first, then paste the join token here."
+  read -rp "Join token: " JOIN_TOKEN
+  [[ -z "$JOIN_TOKEN" ]] && { echo "Join token required. Create a room in the UI first."; exit 1; }
+fi
+
+# Resolve room name from join token
+ROOM_INFO=$(curl -sf -X POST "$SERVER/api/v1/join" \
+  -H "Content-Type: application/json" \
+  -d "{\"join_token\": \"$JOIN_TOKEN\", \"name\": \"__probe__\", \"role\": \"probe\"}" 2>/dev/null) || {
+  echo "Error: invalid join token or server unreachable ($SERVER)"
+  exit 1
+}
+ROOM=$(echo "$ROOM_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['room'])")
+# Delete the probe agent (it registered but we don't need it)
+# No delete endpoint, but it's harmless — just a DB row
+
+if [[ -z "$TASK" ]]; then
   echo ""
   echo "Task description (paste multiline text, then press Ctrl+D when done):"
   TASK="$(cat)"
-  TASK="$(echo "$TASK" | sed '/^$/d')"  # strip blank lines
+  TASK="$(echo "$TASK" | sed '/^$/d')"
   [[ -z "$TASK" ]] && { echo "Task required."; exit 1; }
-fi
-
-if [[ -z "$ROOM" ]]; then
-  # Auto-generate room name from first line of task
-  ROOM=$(echo "$TASK" | head -1 | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-40 | sed 's/-$//')
 fi
 
 if [[ -z "$TEAM_SPEC" ]]; then
@@ -137,14 +150,9 @@ echo "Team:    ${ROLES[*]}"
 echo ""
 
 # ---------------------------------------------------------------------------
-# Create room + register agents
+# Register agents using join token
 # ---------------------------------------------------------------------------
-echo "Setting up on $SERVER..."
-
-# Create room
-curl -sf -X POST "$SERVER/api/v1/rooms" \
-  -H "Content-Type: application/json" \
-  -d "{\"name\": \"$ROOM\", \"topic\": $(echo "$TASK" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()))')}" > /dev/null
+echo "Registering agents..."
 
 declare -a TOKENS=()
 declare -a IDS=()
@@ -154,9 +162,9 @@ for i in "${!ROLES[@]}"; do
   name="${NAMES[$i]}"
   card="${ROLE_CARDS[$role]:-'{}'}"
 
-  result=$(curl -sf -X POST "$SERVER/api/v1/register" \
+  result=$(curl -sf -X POST "$SERVER/api/v1/join" \
     -H "Content-Type: application/json" \
-    -d "{\"name\": \"$name\", \"role\": \"$role\", \"card\": $card}")
+    -d "{\"join_token\": \"$JOIN_TOKEN\", \"name\": \"$name\", \"role\": \"$role\", \"card\": $card}")
 
   token=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
   agent_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
@@ -219,15 +227,14 @@ Chat room: ${ROOM}
 Your team:
 ${ROSTER}
 ## Workflow
-1. Join the room: curl -s -X POST "${SERVER}/api/v1/rooms/${ROOM}/join" -H "Authorization: Bearer ${token}"
-2. Check existing messages: curl -s "${SERVER}/api/v1/rooms/${ROOM}/messages" -H "Authorization: Bearer ${token}"
-3. Enter a loop:
+1. Check existing messages: curl -s "${SERVER}/api/v1/rooms/${ROOM}/messages" -H "Authorization: Bearer ${token}"
+2. Enter a loop:
    a. Poll for new messages: curl -s "${SERVER}/api/v1/me/unread?wait=60" -H "Authorization: Bearer ${token}"
    b. Read messages. Only respond when you have something substantive to contribute or when someone addresses you.
    c. Repeat until the task is resolved.
-4. Use DMs for private side-conversations when appropriate.
-5. Upload documents (design docs, code) to share artifacts with the room.
-6. When the task is done, update room status: curl -s -X POST "${SERVER}/api/v1/rooms/${ROOM}/status" -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"status": "completed"}'
+3. Use DMs for private side-conversations when appropriate.
+4. Upload documents (design docs, code) to share artifacts with the room.
+5. When the task is done, update room status: curl -s -X POST "${SERVER}/api/v1/rooms/${ROOM}/status" -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"status": "completed"}'
 
 Messages from humans have priority:true — drop everything and address those first.
 PROMPT

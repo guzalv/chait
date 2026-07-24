@@ -4,12 +4,14 @@ Starts a local server on a random port, runs tests against it, tears down.
 No external server needed.
 """
 
+import http.cookiejar
 import json
 import multiprocessing
 import os
 import socket
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -59,6 +61,27 @@ def _api_post(base, path, body, token=None):
         return json.loads(r.read())
 
 
+def _login_session(base):
+    """Login as human and return a cookie-aware opener."""
+    cj = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    login_data = urllib.parse.urlencode({"user": USER, "password": PASS}).encode()
+    opener.open(f"{base}/login", login_data)
+    return opener
+
+
+def _ui_api_post(opener, base, path, body):
+    """POST to UI API endpoint with session cookie."""
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        f"{base}{path}", data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with opener.open(req) as r:
+        return json.loads(r.read())
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
@@ -88,7 +111,19 @@ def server_url():
 def test_data(server_url):
     """Create a room + agent + messages via API for tests to use."""
     room_name = f"uitest-{int(time.time())}"
-    agent = _api_post(server_url, "/api/v1/register", {
+
+    # 1. Login as human (capture session cookie)
+    opener = _login_session(server_url)
+
+    # 2. Create room via UI API (uses session cookie)
+    room_data = _ui_api_post(opener, server_url, "/ui/api/rooms", {
+        "name": room_name, "topic": "UI test topic",
+    })
+    join_token = room_data["join_token"]
+
+    # 3. Join as agent via join token
+    agent = _api_post(server_url, "/api/v1/join", {
+        "join_token": join_token,
         "name": "TestBot",
         "role": "tester",
         "card": {
@@ -97,10 +132,11 @@ def test_data(server_url):
         },
     })
     token = agent["token"]
-    _api_post(server_url, "/api/v1/rooms", {"name": room_name, "topic": "UI test topic"})
-    _api_post(server_url, f"/api/v1/rooms/{room_name}/join", {}, token=token)
+
+    # 4. Post messages using agent token
     _api_post(server_url, f"/api/v1/rooms/{room_name}/messages", {"text": "Hello from TestBot"}, token=token)
     _api_post(server_url, f"/api/v1/rooms/{room_name}/messages", {"text": "Second message"}, token=token)
+
     return {"room": room_name, "agent": agent, "token": token}
 
 
