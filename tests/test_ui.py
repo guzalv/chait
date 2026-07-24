@@ -767,6 +767,46 @@ class TestDMConversation:
 # ── Room persistence ─────────────────────────────────────────────────────
 
 
+class TestBrowserNavigation:
+    def test_back_returns_to_sidebar(self, mobile_driver, server_url, mobile_logged_in, test_data):
+        """Browser back from room view should return to sidebar, not leave the app."""
+        mobile_driver.get(server_url + "#")
+        WebDriverWait(mobile_driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
+        # Tap room (pushes one history entry)
+        for item in mobile_driver.find_elements(By.CSS_SELECTOR, ".room-item"):
+            if test_data["room"] in item.text:
+                item.click()
+                break
+        WebDriverWait(mobile_driver, 5).until(EC.visibility_of_element_located((By.ID, "room-view")))
+        assert mobile_driver.find_element(By.ID, "main").is_displayed()
+        mobile_driver.back()
+        WebDriverWait(mobile_driver, 5).until(EC.visibility_of_element_located((By.ID, "sidebar")))
+        assert "/login" not in mobile_driver.current_url
+
+    def test_back_from_second_room(self, driver, server_url, logged_in, test_data):
+        """Open room A, open room B, back should return to room A."""
+        driver.get(server_url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
+        items = driver.find_elements(By.CSS_SELECTOR, ".room-item")
+        # Click first room
+        items[0].click()
+        WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.ID, "room-title")))
+        first_title = driver.find_element(By.ID, "room-title").text
+        # Click second room (if exists)
+        if len(items) < 2:
+            return  # skip if only one room
+        driver.get(server_url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
+        items = driver.find_elements(By.CSS_SELECTOR, ".room-item")
+        items[1].click()
+        WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.ID, "room-title")))
+        second_title = driver.find_element(By.ID, "room-title").text
+        assert first_title != second_title
+        driver.back()
+        time.sleep(1)
+        assert driver.find_element(By.ID, "room-title").text == first_title
+
+
 class TestRoomPersistence:
     def test_room_persists_across_refresh(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)

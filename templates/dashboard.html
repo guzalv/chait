@@ -199,18 +199,23 @@ async function loadRooms(){
 }
 
 function isMobile(){return window.innerWidth<768}
-function showSidebar(){document.getElementById('sidebar').classList.remove('hidden');document.getElementById('main').classList.remove('active')}
+function showSidebar(pushHistory=true){
+  document.getElementById('sidebar').classList.remove('hidden');
+  document.getElementById('main').classList.remove('active');
+  if(pushHistory)history.pushState({room:null},'','#');
+}
 function showMessages(){document.getElementById('sidebar').classList.add('hidden');document.getElementById('main').classList.add('active')}
 function togglePanel(){document.getElementById('right-panel').classList.toggle('open')}
 
 // --- Room selection (plan 28b: persist, plan 23: mark read) ---
-async function selectRoom(name){
+async function selectRoom(name, pushHistory=true){
   currentRoom=name;lastTs=null;
   sessionStorage.setItem('chait_room',name);
   document.getElementById('no-room').style.display='none';
   document.getElementById('room-view').style.display='flex';
   document.getElementById('room-title').textContent='#'+name;
   if(isMobile())showMessages();
+  if(pushHistory)history.pushState({room:name},'','#'+encodeURIComponent(name));
   const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/messages`);
   if(msgs===null){
     // Room might not exist or server error — go back to sidebar
@@ -382,8 +387,24 @@ document.querySelectorAll('.modal').forEach(modal=>{
 const ta=document.getElementById('msg-input');
 ta.addEventListener('input',()=>{ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,200)+'px'});
 
+// --- Browser back/forward (History API) ---
+window.addEventListener('popstate',e=>{
+  const room=e.state&&e.state.room;
+  if(room){selectRoom(room,false)}
+  else{
+    currentRoom=null;sessionStorage.removeItem('chait_room');
+    document.getElementById('room-view').style.display='none';
+    document.getElementById('no-room').style.display='flex';
+    if(isMobile())showSidebar(false);
+    if(pollInterval){clearInterval(pollInterval);pollInterval=null}
+    loadRooms();
+  }
+});
+
 // --- Init (plan 28b: restore room) ---
 loadRooms();setInterval(loadRooms,10000);
-const savedRoom=sessionStorage.getItem('chait_room');
-if(savedRoom)selectRoom(savedRoom);
+// Restore from hash or sessionStorage
+const hashRoom=decodeURIComponent(location.hash.slice(1));
+const savedRoom=hashRoom||sessionStorage.getItem('chait_room');
+if(savedRoom){history.replaceState({room:savedRoom},'','#'+encodeURIComponent(savedRoom));selectRoom(savedRoom,false)}
 </script></body></html>
