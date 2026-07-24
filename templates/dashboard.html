@@ -245,7 +245,8 @@ async function loadMessages(){
   if(msgs.length>0){lastTs=msgs[msgs.length-1].created_at;markRead(currentRoom,lastTs)}
 }
 async function pollMessages(){
-  if(!currentRoom||!lastTs)return;
+  if(!currentRoom)return;
+  if(!lastTs){await loadMessages();return;}
   const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/messages?since=${encodeURIComponent(lastTs)}`);
   if(!msgs||!msgs.length)return;
   appendMessages(msgs);lastTs=msgs[msgs.length-1].created_at;markRead(currentRoom,lastTs);loadRoomDetails();
