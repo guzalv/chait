@@ -32,6 +32,8 @@ DOCS_DIR = DATA_DIR / "documents"
 PORT = int(os.getenv("CHAIT_PORT", "3100"))
 HUMAN_USER = os.getenv("CHAIT_HUMAN_USER", "admin")
 HUMAN_PASS = os.getenv("CHAIT_HUMAN_PASS", "changeme")
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+MAX_MESSAGE_LENGTH = 100_000  # 100 KB
 
 # Long-poll: new-message event per agent
 _unread_events: dict[str, asyncio.Event] = {}
@@ -57,7 +59,8 @@ _db: Optional[aiosqlite.Connection] = None
 
 
 async def get_db() -> aiosqlite.Connection:
-    assert _db is not None
+    if _db is None:
+        raise HTTPException(503, "Database unavailable")
     return _db
 
 
@@ -67,6 +70,8 @@ async def init_db():
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
     _db = await aiosqlite.connect(str(DB_PATH))
     _db.row_factory = aiosqlite.Row
+    await _db.execute("PRAGMA journal_mode=WAL")
+    await _db.execute("PRAGMA busy_timeout=5000")
     await _db.executescript("""
         CREATE TABLE IF NOT EXISTS agents (
             id TEXT PRIMARY KEY,
@@ -440,6 +445,8 @@ async def post_message(room_name: str, request: Request, agent: dict = Depends(a
     reply_to = body.get("reply_to")
     if not text:
         raise HTTPException(400, "text required")
+    if len(text) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
     rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
     if not rows:
@@ -489,6 +496,8 @@ async def send_dm(target_id: str, request: Request, agent: dict = Depends(auth_a
     text = body.get("text", "")
     if not text:
         raise HTTPException(400, "text required")
+    if len(text) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
     dm_id = _uid()
     now = _now()
@@ -595,16 +604,19 @@ async def upload_document(room_name: str, file: UploadFile = File(...), agent: d
     doc_id = _uid()
     room_doc_dir = DOCS_DIR / room_id
     room_doc_dir.mkdir(parents=True, exist_ok=True)
-    content = await file.read()
-    (room_doc_dir / f"{doc_id}_{file.filename}").write_bytes(content)
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large (50 MB max)")
+    safe_name = Path(file.filename).name or "unnamed"
+    (room_doc_dir / f"{doc_id}_{safe_name}").write_bytes(content)
     await db.execute(
         "INSERT INTO documents (id, room_id, filename, content_type, uploaded_by, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc_id, room_id, file.filename, file.content_type, agent["id"], len(content), _now()),
+        (doc_id, room_id, safe_name, file.content_type, agent["id"], len(content), _now()),
     )
     await db.commit()
     members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
-    return {"id": doc_id, "filename": file.filename, "size": len(content)}
+    return {"id": doc_id, "filename": safe_name, "size": len(content)}
 
 
 @app.get("/api/v1/rooms/{room_name}/documents")
@@ -992,9 +1004,11 @@ async def ui_messages(room_name: str, since: Optional[str] = None, session: str 
     room_id = dict(rows[0])["id"]
     if since:
         msgs = await db.execute_fetchall(
-            "SELECT * FROM messages WHERE room_id = ? AND created_at > ? ORDER BY created_at", (room_id, since))
+            "SELECT * FROM messages WHERE room_id = ? AND created_at > ? ORDER BY created_at LIMIT 200", (room_id, since))
     else:
-        msgs = await db.execute_fetchall("SELECT * FROM messages WHERE room_id = ? ORDER BY created_at", (room_id,))
+        msgs = await db.execute_fetchall(
+            "SELECT * FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT 200", (room_id,))
+        msgs = list(reversed(msgs))
     return [_msg_dict(m) for m in msgs]
 
 
@@ -1031,6 +1045,8 @@ async def ui_send_message(room_name: str, request: Request, session: str = Depen
     text = body.get("text", "")
     if not text:
         raise HTTPException(400)
+    if len(text) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
     rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
     if not rows:
@@ -1058,16 +1074,19 @@ async def ui_upload_document(room_name: str, file: UploadFile = File(...), sessi
     doc_id = _uid()
     room_doc_dir = DOCS_DIR / room_id
     room_doc_dir.mkdir(parents=True, exist_ok=True)
-    content = await file.read()
-    (room_doc_dir / f"{doc_id}_{file.filename}").write_bytes(content)
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "File too large (50 MB max)")
+    safe_name = Path(file.filename).name or "unnamed"
+    (room_doc_dir / f"{doc_id}_{safe_name}").write_bytes(content)
     await db.execute(
         "INSERT INTO documents (id, room_id, filename, content_type, uploaded_by, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc_id, room_id, file.filename, file.content_type, "human", len(content), _now()),
+        (doc_id, room_id, safe_name, file.content_type, "human", len(content), _now()),
     )
     await db.commit()
     members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
-    return {"id": doc_id, "filename": file.filename, "size": len(content)}
+    return {"id": doc_id, "filename": safe_name, "size": len(content)}
 
 
 @app.post("/ui/api/dm/{target_id}")
@@ -1076,6 +1095,8 @@ async def ui_send_dm(target_id: str, request: Request, session: str = Depends(re
     text = body.get("text", "")
     if not text:
         raise HTTPException(400)
+    if len(text) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
     dm_id = _uid()
     now = _now()
@@ -1123,4 +1144,5 @@ async def ui_revoke_api_token(token_id: str, session: str = Depends(require_huma
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")
+    host = os.getenv("CHAIT_HOST", "0.0.0.0")
+    uvicorn.run(app, host=host, port=PORT, log_level="info")
