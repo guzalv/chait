@@ -193,7 +193,7 @@ async function loadRooms(){
     const sc='status-'+r.status;
     const hasUnread=activity&&activity[r.name]&&(!lastRead[r.name]||activity[r.name]>lastRead[r.name]);
     const dot=hasUnread?'<span class="unread-dot"></span>':'';
-    return `<div class="room-item ${currentRoom===r.name?'active':''}" data-status="${esc(r.status)}" onclick="selectRoom(${JSON.stringify(r.name)})">
+    return `<div class="room-item ${currentRoom===r.name?'active':''}" data-status="${esc(r.status)}" onclick="selectRoom(${jsattr(r.name)})">
       <span>${esc(r.name)}${dot}</span><span class="room-status ${sc}">${esc(r.status)}</span></div>`
   }).join('');
 }
@@ -254,6 +254,7 @@ function fmtMsg(m){
   return `<div class="${cls}"><div class="meta"><span class="name">${esc(m.author_name)}</span> <span class="role">[${esc(m.author_role)}]</span> ${t}${badge}</div><div class="text">${esc(m.text)}</div></div>`;
 }
 function esc(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+function jsattr(s){return esc(JSON.stringify(s))}
 
 // --- Room details (plan 26: status control) ---
 async function loadRoomDetails(){
@@ -267,7 +268,7 @@ async function loadRoomDetails(){
     return `<div class="agent-card"><div class="agent-name">${esc(m.name)}</div><div class="agent-role">${esc(m.role)}</div>
       ${card.description?`<div class="agent-skills">${esc(card.description)}</div>`:''}
       ${skills?`<div class="agent-skills">Skills: ${esc(skills)}</div>`:''}
-      <button class="btn btn-sm dm-btn" onclick="openDM(${JSON.stringify(m.id)},${JSON.stringify(m.name)})">DM</button></div>`;
+      <button class="btn btn-sm dm-btn" onclick="openDM(${jsattr(m.id)},${jsattr(m.name)})">DM</button></div>`;
   }).join('');
   const docs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/documents`);
   document.getElementById('docs-list').innerHTML=(docs||[]).map(d=>
@@ -359,7 +360,7 @@ async function openApiTokens(){
   el.innerHTML=tokens.map(t=>
     `<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.4rem">
       <div class="token-display" style="flex:1;margin:0;font-size:.7rem" onclick="navigator.clipboard.writeText(this.textContent)">${esc(t.token)}</div>
-      <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="revokeApiToken(${JSON.stringify(t.id)})">Revoke</button>
+      <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="revokeApiToken(${jsattr(t.id)})">Revoke</button>
     </div>`
   ).join('');
 }
