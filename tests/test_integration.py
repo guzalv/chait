@@ -29,6 +29,7 @@ def client(tmp_path):
     server.DOCS_DIR = tmp_path / "documents"
     server._db = None
     server._unread_events.clear()
+    server._rate_buckets.clear()
     with TestClient(app=server.app) as c:
         yield c
 

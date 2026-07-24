@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import os
+import random
 import secrets
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -37,8 +39,23 @@ PORT = int(os.getenv("CHAIT_PORT", "3100"))
 HUMAN_USER = os.getenv("CHAIT_HUMAN_USER", "admin")
 HUMAN_PASS = os.getenv("CHAIT_HUMAN_PASS", "changeme")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+TOKEN_TTL_HOURS = int(os.getenv("CHAIT_TOKEN_TTL_HOURS", "24"))
 MAX_MESSAGE_LENGTH = 100_000  # 100 KB
 RESERVED_ROLES = {"god", "human", "admin", "system"}
+
+# Rate limiting
+_rate_buckets: dict[str, list[float]] = {}
+
+
+def _check_rate(key: str, max_per_minute: int = 30):
+    """Sliding-window rate limiter. Raises 429 if exceeded."""
+    now = time.time()
+    bucket = _rate_buckets.setdefault(key, [])
+    bucket[:] = [t for t in bucket if now - t < 60]
+    if len(bucket) >= max_per_minute:
+        raise HTTPException(429, "Rate limit exceeded. Try again later.")
+    bucket.append(now)
+
 
 # Long-poll: new-message event per agent
 _unread_events: dict[str, asyncio.Event] = {}
@@ -77,6 +94,7 @@ async def init_db():
     _db.row_factory = aiosqlite.Row
     await _db.execute("PRAGMA journal_mode=WAL")
     await _db.execute("PRAGMA busy_timeout=5000")
+    await _db.execute("PRAGMA foreign_keys=ON")
     logger.info("Database initialized at %s", DB_PATH)
     await _db.executescript("""
         CREATE TABLE IF NOT EXISTS agents (
@@ -151,6 +169,7 @@ async def init_db():
         ("room_id", "agents", "NULL"),
         ("status", "rooms", "'active'"),
         ("join_token", "rooms", "''"),
+        ("expires_at", "agents", "NULL"),
     ]:
         try:
             await _db.execute(f"SELECT {col} FROM {tbl} LIMIT 1")
@@ -184,6 +203,8 @@ async def auth_agent(request: Request) -> dict:
     if not agent:
         logger.warning("Auth failed: invalid token from %s", request.client.host if request.client else "unknown")
         raise HTTPException(401, "Invalid token")
+    if agent.get("expires_at") and agent["expires_at"] < _now():
+        raise HTTPException(401, "Token expired")
     return agent
 
 
@@ -392,6 +413,7 @@ async def get_instructions(request: Request):
 @app.post("/api/v1/join")
 async def join_with_token(request: Request):
     """Agent joins a room using a join token. Returns agent auth token."""
+    _check_rate(f"join:{request.client.host if request.client else 'unknown'}", max_per_minute=10)
     body = await request.json()
     join_token = body.get("join_token", "")
     name = body.get("name", "")
@@ -423,9 +445,10 @@ async def join_with_token(request: Request):
     else:
         agent_id = _uid()
         agent_token = f"sk-{secrets.token_hex(24)}"
+        expires = (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
         await db.execute(
-            "INSERT INTO agents (id, name, role, token, card, room_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now()),
+            "INSERT INTO agents (id, name, role, token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
         )
         await db.execute(
             "INSERT OR IGNORE INTO room_members (room_id, agent_id, joined_at) VALUES (?, ?, ?)",
@@ -500,6 +523,17 @@ async def update_card(request: Request, agent: dict = Depends(auth_agent)):
     return {"updated": True, "card": card}
 
 
+@app.delete("/api/v1/me")
+async def deregister(agent: dict = Depends(auth_agent)):
+    """Agent self-deregister: removes from all rooms and deletes identity."""
+    db = await get_db()
+    await db.execute("DELETE FROM room_members WHERE agent_id = ?", (agent["id"],))
+    await db.execute("DELETE FROM agents WHERE id = ?", (agent["id"],))
+    await db.commit()
+    logger.info("Agent '%s' deregistered", agent["name"])
+    return {"status": "deregistered"}
+
+
 # ---------------------------------------------------------------------------
 # Room management
 # ---------------------------------------------------------------------------
@@ -557,6 +591,7 @@ async def set_room_status(room_name: str, request: Request, agent: dict = Depend
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/rooms/{room_name}/messages")
 async def post_message(room_name: str, request: Request, agent: dict = Depends(auth_agent)):
+    _check_rate(f"msg:{agent['id']}", max_per_minute=30)
     body = await request.json()
     text = body.get("text", "")
     reply_to = body.get("reply_to")
@@ -610,6 +645,7 @@ async def get_messages(
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/dm/{target_id}")
 async def send_dm(target_id: str, request: Request, agent: dict = Depends(auth_agent)):
+    _check_rate(f"dm:{agent['id']}", max_per_minute=20)
     body = await request.json()
     text = body.get("text", "")
     if not text:
@@ -695,6 +731,7 @@ async def unread(
             pass
         finally:
             _unread_events.pop(agent["id"], None)
+        await asyncio.sleep(random.random() * 0.2)  # jitter to avoid thundering herd
         room_msgs, dm_msgs, new_docs = await _fetch()
 
     return {
@@ -740,6 +777,7 @@ async def unread(
 # ---------------------------------------------------------------------------
 @app.post("/api/v1/rooms/{room_name}/documents")
 async def upload_document(room_name: str, file: UploadFile = File(...), agent: dict = Depends(auth_agent)):
+    _check_rate(f"upload:{agent['id']}", max_per_minute=10)
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
     doc_id = _uid()
@@ -749,7 +787,7 @@ async def upload_document(room_name: str, file: UploadFile = File(...), agent: d
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "File too large (50 MB max)")
     safe_name = Path(file.filename).name or "unnamed"
-    (room_doc_dir / f"{doc_id}_{safe_name}").write_bytes(content)
+    await asyncio.to_thread((room_doc_dir / f"{doc_id}_{safe_name}").write_bytes, content)
     await db.execute(
         "INSERT INTO documents (id, room_id, filename, content_type, uploaded_by, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (doc_id, room_id, safe_name, file.content_type, agent["id"], len(content), _now()),
@@ -805,6 +843,7 @@ async def login_page():
 
 @app.post("/login")
 async def login_submit(request: Request):
+    _check_rate(f"login:{request.client.host if request.client else 'unknown'}", max_per_minute=5)
     form = await request.form()
     if form.get("user") == HUMAN_USER and form.get("password") == HUMAN_PASS:
         db = await get_db()
@@ -979,7 +1018,7 @@ async def ui_upload_document(room_name: str, file: UploadFile = File(...), sessi
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(413, "File too large (50 MB max)")
     safe_name = Path(file.filename).name or "unnamed"
-    (room_doc_dir / f"{doc_id}_{safe_name}").write_bytes(content)
+    await asyncio.to_thread((room_doc_dir / f"{doc_id}_{safe_name}").write_bytes, content)
     await db.execute(
         "INSERT INTO documents (id, room_id, filename, content_type, uploaded_by, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         (doc_id, room_id, safe_name, file.content_type, "human", len(content), _now()),
@@ -1047,6 +1086,20 @@ async def ui_set_room_status(room_name: str, request: Request, session: str = De
     await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
     await db.commit()
     return {"room": room_name, "status": new_status}
+
+
+# ---------------------------------------------------------------------------
+# Agent management (human-only)
+# ---------------------------------------------------------------------------
+@app.delete("/ui/api/agents/{agent_id}")
+async def ui_remove_agent(agent_id: str, session: str = Depends(require_human)):
+    """Remove an agent from the system."""
+    db = await get_db()
+    await db.execute("DELETE FROM room_members WHERE agent_id = ?", (agent_id,))
+    await db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+    await db.commit()
+    logger.info("Agent '%s' removed by human", agent_id)
+    return {"status": "removed", "agent_id": agent_id}
 
 
 # ---------------------------------------------------------------------------
