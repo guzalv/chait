@@ -66,10 +66,12 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   .panel-toggle{display:inline-block}
 }
 @media(max-width:767px){
-  #sidebar{position:fixed;top:0;left:0;bottom:0;width:100%;z-index:80;display:flex}
+  #sidebar{position:fixed;top:0;left:0;bottom:0;width:100%;z-index:80;display:flex;flex-direction:column}
   #sidebar.hidden{display:none}
-  #main{display:none;width:100%}
+  #main{display:none;width:100%;flex-direction:column}
   #main.active{display:flex}
+  #right-panel{display:none}
+  #right-panel.open{display:flex}
   .mobile-back{display:inline-block}
   .modal .modal-box{width:92vw;max-width:420px}
 }
@@ -209,7 +211,19 @@ async function selectRoom(name){
   document.getElementById('room-view').style.display='flex';
   document.getElementById('room-title').textContent='#'+name;
   if(isMobile())showMessages();
-  loadRooms();await loadMessages();await loadRoomDetails();
+  const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/messages`);
+  if(msgs===null){
+    // Room might not exist or server error — go back to sidebar
+    currentRoom=null;sessionStorage.removeItem('chait_room');
+    document.getElementById('room-view').style.display='none';
+    document.getElementById('no-room').style.display='flex';
+    if(isMobile())showSidebar();
+    return;
+  }
+  renderMessages(msgs);
+  if(msgs.length>0){lastTs=msgs[msgs.length-1].created_at;markRead(name,lastTs)}
+  await loadRoomDetails();
+  loadRooms();
   if(pollInterval)clearInterval(pollInterval);pollInterval=setInterval(pollMessages,3000);
 }
 
