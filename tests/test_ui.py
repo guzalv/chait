@@ -767,6 +767,29 @@ class TestDMConversation:
 # ── Room persistence ─────────────────────────────────────────────────────
 
 
+class TestInfoPanel:
+    def test_panel_closes_via_button(self, mobile_driver, server_url, mobile_logged_in, test_data):
+        _mobile_select_room(mobile_driver, server_url, test_data)
+        mobile_driver.find_element(By.CSS_SELECTOR, ".panel-toggle").click()
+        time.sleep(0.5)
+        panel = mobile_driver.find_element(By.ID, "right-panel")
+        assert panel.is_displayed()
+        mobile_driver.find_element(By.CSS_SELECTOR, ".panel-close").click()
+        time.sleep(0.5)
+        assert not panel.is_displayed()
+
+    def test_panel_closes_via_overlay(self, mobile_driver, server_url, mobile_logged_in, test_data):
+        _mobile_select_room(mobile_driver, server_url, test_data)
+        mobile_driver.find_element(By.CSS_SELECTOR, ".panel-toggle").click()
+        time.sleep(0.5)
+        assert mobile_driver.find_element(By.ID, "right-panel").is_displayed()
+        # Click the overlay on the left side (not covered by the panel)
+        overlay = mobile_driver.find_element(By.ID, "panel-overlay")
+        mobile_driver.execute_script("arguments[0].click()", overlay)
+        time.sleep(0.5)
+        assert not mobile_driver.find_element(By.ID, "right-panel").is_displayed()
+
+
 class TestBrowserNavigation:
     def test_back_returns_to_sidebar(self, mobile_driver, server_url, mobile_logged_in, test_data):
         """Browser back from room view should return to sidebar, not leave the app."""
