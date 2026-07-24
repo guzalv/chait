@@ -11,6 +11,19 @@ permissions:
   packages: write
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: Lint
+        run: ruff check server.py tests/
+      - name: Format check
+        run: ruff format --check server.py tests/
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -18,12 +31,61 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: make test-api test-integration
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest httpx
+      - name: API tests
+        run: pytest tests/test_api.py -v
+      - name: Integration tests
+        run: pytest tests/test_integration.py -v
 
-  docker:
-    needs: test
-    if: github.ref == 'refs/heads/main'
+  test-ui:
     runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest httpx selenium
+      - name: Install Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
+      - name: UI tests
+        run: pytest tests/test_ui.py -v
+        env:
+          DISPLAY: ":99"
+
+  build:
+    needs: [lint, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t chait-test .
+      - name: Smoke test
+        run: |
+          docker run -d --name chait-smoke \
+            -p 3100:3100 \
+            -e CHAIT_HUMAN_USER=admin \
+            -e CHAIT_HUMAN_PASS=ci-test-pass \
+            chait-test
+          sleep 3
+          curl -sf http://localhost:3100/api/v1/instructions > /dev/null
+          docker stop chait-smoke
+
+  release:
+    needs: [build]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: docker/login-action@v3
@@ -31,7 +93,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
-        with:
-          push: true
-          tags: ghcr.io/${{ github.repository }}:latest
+      - name: Build and push
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | head -c 7)
+          DATE_TAG=$(date +%Y%m%d)
+          IMAGE=ghcr.io/${{ github.repository }}
+
+          docker build \
+            -t ${IMAGE}:latest \
+            -t ${IMAGE}:${SHORT_SHA} \
+            -t ${IMAGE}:${DATE_TAG} \
+            .
+
+          docker push ${IMAGE}:latest
+          docker push ${IMAGE}:${SHORT_SHA}
+          docker push ${IMAGE}:${DATE_TAG}

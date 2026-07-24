@@ -39,17 +39,21 @@ def _run_server(port, data_dir):
     os.environ["CHAIT_HUMAN_PASS"] = PASS
     os.environ["CHAIT_DATA_DIR"] = data_dir
     import uvicorn
+
     # Import after setting env so config picks it up
     import importlib, sys
+
     # Ensure fresh module load with new env
     if "server" in sys.modules:
         del sys.modules["server"]
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
     from server import app
+
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
 
 # ── API helpers ───────────────────────────────────────────────────────────
+
 
 def _api_post(base, path, body, token=None):
     data = json.dumps(body).encode()
@@ -74,7 +78,8 @@ def _ui_api_post(opener, base, path, body):
     """POST to UI API endpoint with session cookie."""
     data = json.dumps(body).encode()
     req = urllib.request.Request(
-        f"{base}{path}", data=data,
+        f"{base}{path}",
+        data=data,
         headers={"Content-Type": "application/json"},
         method="POST",
     )
@@ -83,6 +88,7 @@ def _ui_api_post(opener, base, path, body):
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
+
 
 @pytest.fixture(scope="session")
 def server_url():
@@ -116,21 +122,31 @@ def test_data(server_url):
     opener = _login_session(server_url)
 
     # 2. Create room via UI API (uses session cookie)
-    room_data = _ui_api_post(opener, server_url, "/ui/api/rooms", {
-        "name": room_name, "topic": "UI test topic",
-    })
+    room_data = _ui_api_post(
+        opener,
+        server_url,
+        "/ui/api/rooms",
+        {
+            "name": room_name,
+            "topic": "UI test topic",
+        },
+    )
     join_token = room_data["join_token"]
 
     # 3. Join as agent via join token
-    agent = _api_post(server_url, "/api/v1/join", {
-        "join_token": join_token,
-        "name": "TestBot",
-        "role": "tester",
-        "card": {
-            "description": "Bot for UI tests",
-            "skills": ["selenium", "pytest"],
+    agent = _api_post(
+        server_url,
+        "/api/v1/join",
+        {
+            "join_token": join_token,
+            "name": "TestBot",
+            "role": "tester",
+            "card": {
+                "description": "Bot for UI tests",
+                "skills": ["selenium", "pytest"],
+            },
         },
-    })
+    )
     token = agent["token"]
 
     # 4. Post messages using agent token
@@ -148,8 +164,11 @@ def driver():
     if os.path.exists(snap_bin):
         opts.binary_location = snap_bin
     for a in [
-        "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
-        "--disable-gpu", "--window-size=1920,1080",
+        "--headless=new",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--window-size=1920,1080",
         f"--user-data-dir={tempfile.mkdtemp(dir='/tmp')}",
     ]:
         opts.add_argument(a)
@@ -177,6 +196,7 @@ def logged_in(driver, server_url):
 
 
 # ── Login flow ────────────────────────────────────────────────────────────
+
 
 class TestLogin:
     def test_login_page_renders(self, driver, server_url):
@@ -214,21 +234,18 @@ class TestLogin:
 
 # ── Dashboard layout ─────────────────────────────────────────────────────
 
+
 class TestDashboard:
     def test_sidebar_shows_rooms(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         items = driver.find_elements(By.CSS_SELECTOR, ".room-item")
         names = [i.text.split("\n")[0] for i in items]
         assert test_data["room"] in " ".join(names)
 
     def test_rooms_have_status_badges(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-status"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-status")))
         badges = driver.find_elements(By.CSS_SELECTOR, ".room-status")
         assert len(badges) > 0
         classes = " ".join(b.get_attribute("class") for b in badges)
@@ -243,78 +260,62 @@ class TestDashboard:
 
     def test_select_room_placeholder(self, driver, server_url, logged_in):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "no-room"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "no-room")))
         el = driver.find_element(By.ID, "no-room")
         assert "Select a room" in el.text
 
 
 # ── Room interaction ─────────────────────────────────────────────────────
 
+
 class TestRoomInteraction:
     def test_clicking_room_shows_header(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         items = driver.find_elements(By.CSS_SELECTOR, ".room-item")
         for item in items:
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.visibility_of_element_located((By.ID, "room-title"))
-        )
+        WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.ID, "room-title")))
         title = driver.find_element(By.ID, "room-title").text
         assert test_data["room"] in title
 
     def test_messages_area_populates(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg")))
         msgs = driver.find_elements(By.CSS_SELECTOR, "#messages .msg")
         assert len(msgs) >= 2
 
     def test_room_topic_displays(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.visibility_of_element_located((By.ID, "room-topic"))
-        )
+        WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.ID, "room-topic")))
         topic = driver.find_element(By.ID, "room-topic").text
         assert "UI test topic" in topic
 
 
 # ── Agent cards ──────────────────────────────────────────────────────────
 
+
 class TestAgentCards:
     def _select_room(self, driver, server_url, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".agent-card"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".agent-card")))
 
     def test_agent_card_shows_name_role_desc(self, driver, server_url, logged_in, test_data):
         self._select_room(driver, server_url, test_data)
@@ -338,19 +339,16 @@ class TestAgentCards:
 
 # ── Human messaging ──────────────────────────────────────────────────────
 
+
 class TestHumanMessaging:
     def _select_room(self, driver, server_url, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg")))
 
     def test_send_via_button(self, driver, server_url, logged_in, test_data):
         self._select_room(driver, server_url, test_data)
@@ -384,19 +382,16 @@ class TestHumanMessaging:
 
 # ── File upload ──────────────────────────────────────────────────────────
 
+
 class TestFileUpload:
     def test_upload_button_exists(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "input-area"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "input-area")))
         labels = driver.find_elements(By.CSS_SELECTOR, "#input-area label")
         assert any("Upload" in l.text for l in labels)
 
@@ -407,19 +402,16 @@ class TestFileUpload:
 
 # ── DM modal ─────────────────────────────────────────────────────────────
 
+
 class TestDMModal:
     def _open_dm(self, driver, server_url, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".dm-btn"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".dm-btn")))
         driver.find_element(By.CSS_SELECTOR, ".dm-btn").click()
         WebDriverWait(driver, 10).until(
             lambda d: d.find_element(By.ID, "dm-modal").value_of_css_property("display") != "none"
@@ -451,19 +443,16 @@ class TestDMModal:
 
 # ── Live updates ─────────────────────────────────────────────────────────
 
+
 class TestLiveUpdates:
     def test_sent_message_appears_after_send(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg")))
         unique = f"live-{int(time.time())}"
         textarea = driver.find_element(By.ID, "msg-input")
         textarea.send_keys(unique)
@@ -473,19 +462,14 @@ class TestLiveUpdates:
 
     def test_api_message_appears_on_poll(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg"))
-        )
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg")))
         unique = f"api-{int(time.time())}"
-        _api_post(server_url, f"/api/v1/rooms/{test_data['room']}/messages",
-                  {"text": unique}, token=test_data["token"])
+        _api_post(server_url, f"/api/v1/rooms/{test_data['room']}/messages", {"text": unique}, token=test_data["token"])
         # Wait for poll interval (3s in JS)
         time.sleep(5)
         assert unique in driver.find_element(By.ID, "messages").text

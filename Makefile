@@ -3,7 +3,7 @@ PY := $(VENV)/bin/python
 PIP := $(VENV)/bin/pip
 PYTEST := $(PY) -m pytest
 
-.PHONY: test test-api test-integration test-ui deps test-deps server docker help
+.PHONY: test test-api test-integration test-ui lint fmt fmt-fix deps test-deps server docker help
 
 server: deps ## Start the server
 	$(PY) server.py
@@ -19,11 +19,18 @@ test-integration: test-deps ## Integration tests with mock agents (no server nee
 test-ui: test-deps ## UI tests (requires running server + chromium)
 	$(PYTEST) tests/test_ui.py -v
 
+lint: test-deps ## Run linter + format check
+	$(VENV)/bin/ruff check server.py tests/
+	$(VENV)/bin/ruff format --check server.py tests/
+
+fmt: test-deps ## Auto-format code
+	$(VENV)/bin/ruff format server.py tests/
+
 deps: $(VENV) ## Install runtime dependencies
 	$(PIP) install -q -r requirements.txt
 
 test-deps: deps
-	$(PIP) install -q pytest httpx
+	$(PIP) install -q pytest httpx ruff
 
 $(VENV):
 	python3 -m venv $(VENV)

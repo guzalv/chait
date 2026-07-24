@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import secrets
 import uuid
@@ -26,6 +27,9 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+logger = logging.getLogger("chait")
+
+_TEMPLATE_DIR = Path(__file__).parent / "templates"
 DATA_DIR = Path(os.getenv("CHAIT_DATA_DIR", "./data"))
 DB_PATH = DATA_DIR / "chait.db"
 DOCS_DIR = DATA_DIR / "documents"
@@ -73,6 +77,7 @@ async def init_db():
     _db.row_factory = aiosqlite.Row
     await _db.execute("PRAGMA journal_mode=WAL")
     await _db.execute("PRAGMA busy_timeout=5000")
+    logger.info("Database initialized at %s", DB_PATH)
     await _db.executescript("""
         CREATE TABLE IF NOT EXISTS agents (
             id TEXT PRIMARY KEY,
@@ -176,6 +181,7 @@ async def auth_agent(request: Request) -> dict:
         raise HTTPException(401, "Missing Bearer token")
     agent = await _get_agent_by_token(auth[7:])
     if not agent:
+        logger.warning("Auth failed: invalid token from %s", request.client.host if request.client else "unknown")
         raise HTTPException(401, "Invalid token")
     return agent
 
@@ -200,8 +206,8 @@ async def auth_human(request: Request) -> Optional[str]:
     db = await get_db()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
     rows = await db.execute_fetchall(
-        "SELECT * FROM sessions WHERE token = ? AND created_at > ?",
-        (session_token, cutoff))
+        "SELECT * FROM sessions WHERE token = ? AND created_at > ?", (session_token, cutoff)
+    )
     return session_token if rows else None
 
 
@@ -225,7 +231,8 @@ async def _require_room_member(db: aiosqlite.Connection, room_name: str, agent_i
         raise HTTPException(404, "Room not found")
     room_id = dict(rows[0])["id"]
     member = await db.execute_fetchall(
-        "SELECT 1 FROM room_members WHERE room_id = ? AND agent_id = ?", (room_id, agent_id))
+        "SELECT 1 FROM room_members WHERE room_id = ? AND agent_id = ?", (room_id, agent_id)
+    )
     if not member:
         raise HTTPException(403, "Not a member of this room")
     return room_id
@@ -241,17 +248,26 @@ async def require_human(request: Request) -> str:
 def _msg_dict(m) -> dict:
     d = dict(m)
     return {
-        "id": d["id"], "author_id": d["author_id"], "author_name": d["author_name"],
-        "author_role": d["author_role"], "text": d["text"], "reply_to": d.get("reply_to"),
-        "priority": bool(d["priority"]), "created_at": d["created_at"],
+        "id": d["id"],
+        "author_id": d["author_id"],
+        "author_name": d["author_name"],
+        "author_role": d["author_role"],
+        "text": d["text"],
+        "reply_to": d.get("reply_to"),
+        "priority": bool(d["priority"]),
+        "created_at": d["created_at"],
     }
 
 
 def _dm_dict(d) -> dict:
     r = dict(d)
     return {
-        "id": r["id"], "from_id": r["from_id"], "from_name": r["from_name"],
-        "to_id": r["to_id"], "text": r["text"], "priority": bool(r["priority"]),
+        "id": r["id"],
+        "from_id": r["from_id"],
+        "from_name": r["from_name"],
+        "to_id": r["to_id"],
+        "text": r["text"],
+        "priority": bool(r["priority"]),
         "created_at": r["created_at"],
     }
 
@@ -369,8 +385,12 @@ async def join_with_token(request: Request):
         (room["id"],),
     )
     return {
-        "id": agent_id, "name": name, "role": role, "token": agent_token,
-        "room": room["name"], "card": card,
+        "id": agent_id,
+        "name": name,
+        "role": role,
+        "token": agent_token,
+        "room": room["name"],
+        "card": card,
         "context": {
             "topic": room.get("topic", ""),
             "documents": [dict(d) for d in docs],
@@ -392,7 +412,12 @@ async def api_create_room(request: Request, _token: str = Depends(auth_master_to
     db = await get_db()
     existing = await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,))
     if existing:
-        return {"id": dict(existing[0])["id"], "name": name, "join_token": dict(existing[0])["join_token"], "existing": True}
+        return {
+            "id": dict(existing[0])["id"],
+            "name": name,
+            "join_token": dict(existing[0])["join_token"],
+            "existing": True,
+        }
     room_id = _uid()
     join_token = f"chait-{secrets.token_hex(16)}"
     await db.execute(
@@ -447,7 +472,15 @@ async def get_room(room_name: str, agent: dict = Depends(auth_agent)):
         "SELECT a.id, a.name, a.role, a.card FROM agents a JOIN room_members rm ON a.id = rm.agent_id WHERE rm.room_id = ?",
         (room_id,),
     )
-    room["members"] = [{"id": dict(m)["id"], "name": dict(m)["name"], "role": dict(m)["role"], "card": _parse_card(dict(m).get("card"))} for m in members]
+    room["members"] = [
+        {
+            "id": dict(m)["id"],
+            "name": dict(m)["name"],
+            "role": dict(m)["role"],
+            "card": _parse_card(dict(m).get("card")),
+        }
+        for m in members
+    ]
     return room
 
 
@@ -492,8 +525,10 @@ async def post_message(room_name: str, request: Request, agent: dict = Depends(a
 
 @app.get("/api/v1/rooms/{room_name}/messages")
 async def get_messages(
-    room_name: str, since: Optional[str] = None,
-    limit: int = Query(default=50, le=200), agent: dict = Depends(auth_agent),
+    room_name: str,
+    since: Optional[str] = None,
+    limit: int = Query(default=50, le=200),
+    agent: dict = Depends(auth_agent),
 ):
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
@@ -504,7 +539,8 @@ async def get_messages(
         )
     else:
         msgs = await db.execute_fetchall(
-            "SELECT * FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?", (room_id, limit),
+            "SELECT * FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT ?",
+            (room_id, limit),
         )
         msgs = list(reversed(msgs))
     return [_msg_dict(m) for m in msgs]
@@ -538,8 +574,10 @@ async def send_dm(target_id: str, request: Request, agent: dict = Depends(auth_a
 
 @app.get("/api/v1/dm/{target_id}")
 async def get_dms(
-    target_id: str, since: Optional[str] = None,
-    limit: int = Query(default=50, le=200), agent: dict = Depends(auth_agent),
+    target_id: str,
+    since: Optional[str] = None,
+    limit: int = Query(default=50, le=200),
+    agent: dict = Depends(auth_agent),
 ):
     db = await get_db()
     if since:
@@ -599,19 +637,37 @@ async def unread(
 
     return {
         "room_messages": [
-            {"id": dict(m)["id"], "room": dict(m)["room_name"], "author_name": dict(m)["author_name"],
-             "author_role": dict(m)["author_role"], "text": dict(m)["text"],
-             "priority": bool(dict(m)["priority"]), "created_at": dict(m)["created_at"]}
+            {
+                "id": dict(m)["id"],
+                "room": dict(m)["room_name"],
+                "author_name": dict(m)["author_name"],
+                "author_role": dict(m)["author_role"],
+                "text": dict(m)["text"],
+                "priority": bool(dict(m)["priority"]),
+                "created_at": dict(m)["created_at"],
+            }
             for m in room_msgs
         ],
         "dms": [
-            {"id": dict(m)["id"], "from_name": dict(m)["from_name"], "from_id": dict(m)["from_id"],
-             "text": dict(m)["text"], "priority": bool(dict(m)["priority"]), "created_at": dict(m)["created_at"]}
+            {
+                "id": dict(m)["id"],
+                "from_name": dict(m)["from_name"],
+                "from_id": dict(m)["from_id"],
+                "text": dict(m)["text"],
+                "priority": bool(dict(m)["priority"]),
+                "created_at": dict(m)["created_at"],
+            }
             for m in dm_msgs
         ],
         "documents": [
-            {"id": dict(d)["id"], "room": dict(d)["room_name"], "filename": dict(d)["filename"],
-             "size": dict(d)["size"], "uploaded_by": dict(d)["uploaded_by"], "created_at": dict(d)["created_at"]}
+            {
+                "id": dict(d)["id"],
+                "room": dict(d)["room_name"],
+                "filename": dict(d)["filename"],
+                "size": dict(d)["size"],
+                "uploaded_by": dict(d)["uploaded_by"],
+                "created_at": dict(d)["created_at"],
+            }
             for d in new_docs
         ],
     }
@@ -647,8 +703,16 @@ async def list_documents(room_name: str, agent: dict = Depends(auth_agent)):
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
     docs = await db.execute_fetchall("SELECT * FROM documents WHERE room_id = ? ORDER BY created_at", (room_id,))
-    return [{"id": dict(d)["id"], "filename": dict(d)["filename"], "size": dict(d)["size"],
-             "uploaded_by": dict(d)["uploaded_by"], "created_at": dict(d)["created_at"]} for d in docs]
+    return [
+        {
+            "id": dict(d)["id"],
+            "filename": dict(d)["filename"],
+            "size": dict(d)["size"],
+            "uploaded_by": dict(d)["uploaded_by"],
+            "created_at": dict(d)["created_at"],
+        }
+        for d in docs
+    ]
 
 
 @app.get("/api/v1/documents/{doc_id}/download")
@@ -669,13 +733,12 @@ async def download_document(doc_id: str, _auth: dict = Depends(auth_any)):
 # Human Web UI
 # ===========================================================================
 
+LOGIN_HTML = (_TEMPLATE_DIR / "login.html").read_text()
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page():
-    return """<!DOCTYPE html><html><head><title>chait</title>
-<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;display:flex;align-items:center;justify-content:center;min-height:100vh}.card{background:#1e293b;padding:2rem;border-radius:8px;width:320px}h1{margin-bottom:1.5rem;font-size:1.5rem;color:#38bdf8}label{display:block;margin-bottom:.25rem;font-size:.875rem;color:#94a3b8}input{width:100%;padding:.5rem;margin-bottom:1rem;border:1px solid #334155;border-radius:4px;background:#0f172a;color:#e2e8f0}button{width:100%;padding:.5rem;background:#38bdf8;color:#0f172a;border:none;border-radius:4px;font-weight:600;cursor:pointer}button:hover{background:#7dd3fc}.err{color:#f87171;font-size:.875rem;margin-bottom:1rem}</style></head>
-<body><div class="card"><h1>chait</h1><form method="POST" action="/login">
-<label>User</label><input name="user" required><label>Password</label><input name="password" type="password" required>
-<button type="submit">Login</button></form></div></body></html>"""
+    return LOGIN_HTML
 
 
 @app.post("/login")
@@ -689,7 +752,10 @@ async def login_submit(request: Request):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", max_age=86400 * 7)
         return resp
-    return HTMLResponse("<html><body style='background:#0f172a;color:#f87171;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh'>Invalid credentials. <a href='/login' style='color:#38bdf8;margin-left:8px'>Retry</a></body></html>", 401)
+    return HTMLResponse(
+        "<html><body style='background:#0f172a;color:#f87171;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh'>Invalid credentials. <a href='/login' style='color:#38bdf8;margin-left:8px'>Retry</a></body></html>",
+        401,
+    )
 
 
 @app.post("/logout")
@@ -707,276 +773,7 @@ async def logout(request: Request):
 # ---------------------------------------------------------------------------
 # Dashboard HTML
 # ---------------------------------------------------------------------------
-DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>chait</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f0;display:flex;height:100vh}
-#sidebar{width:250px;background:#1e293b;border-right:1px solid #334155;display:flex;flex-direction:column;flex-shrink:0}
-#sidebar h1{padding:1rem;font-size:1.25rem;color:#38bdf8;border-bottom:1px solid #334155;display:flex;justify-content:space-between;align-items:center}
-#sidebar h1 button{font-size:.7rem;padding:.25rem .5rem}
-#rooms-list{flex:1;overflow-y:auto;padding:.5rem}
-.room-item{padding:.5rem .75rem;border-radius:4px;cursor:pointer;font-size:.85rem;margin-bottom:2px;display:flex;justify-content:space-between;align-items:center}
-.room-item:hover{background:#334155}
-.room-item.active{background:#38bdf8;color:#0f172a}
-.room-status{font-size:.65rem;padding:1px 5px;border-radius:3px;font-weight:600}
-.status-active{background:#22c55e;color:#000}.status-waiting-for-input{background:#f59e0b;color:#000}
-.status-completed{background:#64748b;color:#fff}.status-blocked{background:#ef4444;color:#fff}
-#main{flex:1;display:flex;flex-direction:column}
-#room-header{padding:.75rem 1rem;border-bottom:1px solid #334155;background:#1e293b;display:flex;justify-content:space-between;align-items:center}
-#room-header .info{font-size:.75rem;color:#94a3b8}
-#messages{flex:1;overflow-y:auto;padding:1rem}
-.msg{margin-bottom:.75rem}
-.msg .meta{font-size:.7rem;color:#94a3b8;margin-bottom:2px}
-.msg .meta .name{color:#38bdf8;font-weight:600}
-.msg .meta .role{color:#64748b}
-.msg .meta .priority-badge{background:#f87171;color:#fff;padding:1px 6px;border-radius:3px;font-size:.6rem;margin-left:4px}
-.msg .text{font-size:.85rem;white-space:pre-wrap;line-height:1.5}
-.msg.priority{border-left:3px solid #f87171;padding-left:.5rem}
-#input-area{padding:.75rem 1rem;border-top:1px solid #334155;background:#1e293b;display:flex;gap:.5rem;align-items:end}
-#input-area textarea{flex:1;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:.5rem;resize:none;font-family:inherit;font-size:.85rem}
-.btn{background:#38bdf8;color:#0f172a;border:none;border-radius:4px;padding:.5rem .75rem;font-weight:600;cursor:pointer;font-size:.8rem}
-.btn:hover{background:#7dd3fc}
-.btn-sm{padding:.3rem .5rem;font-size:.7rem}
-#right-panel{width:260px;background:#1e293b;border-left:1px solid #334155;padding:.75rem;font-size:.8rem;overflow-y:auto;display:flex;flex-direction:column;gap:1rem}
-#right-panel h3{color:#94a3b8;font-size:.7rem;text-transform:uppercase;margin-bottom:.25rem}
-.agent-card{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:.5rem;margin-bottom:.4rem}
-.agent-card .agent-name{color:#38bdf8;font-weight:600;font-size:.8rem}
-.agent-card .agent-role{color:#64748b;font-size:.7rem}
-.agent-card .agent-skills{color:#94a3b8;font-size:.65rem;margin-top:.25rem}
-.agent-card .dm-btn{margin-top:.3rem}
-.doc-item{padding:.2rem 0}
-.doc-item a{color:#38bdf8;text-decoration:none;font-size:.75rem}
-#no-room{display:flex;align-items:center;justify-content:center;flex:1;color:#64748b;font-size:1rem}
-.modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
-.modal .modal-box{background:#1e293b;padding:1.5rem;border-radius:8px;width:420px}
-.modal h3{color:#38bdf8;margin-bottom:.75rem}
-.modal input,.modal textarea{width:100%;background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:.5rem;margin-bottom:.5rem;font-family:inherit;font-size:.85rem}
-.modal textarea{resize:none}
-.modal .btns{display:flex;gap:.5rem;justify-content:flex-end}
-.token-display{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:.5rem;font-family:monospace;font-size:.8rem;color:#22c55e;word-break:break-all;margin:.5rem 0;cursor:pointer;user-select:all}
-.mobile-back{display:none;background:none;border:none;color:#38bdf8;font-size:1.1rem;cursor:pointer;padding:.25rem .5rem;margin-right:.25rem}
-.panel-toggle{display:none;background:none;border:1px solid #334155;color:#94a3b8;font-size:.75rem;cursor:pointer;padding:.25rem .5rem;border-radius:4px;margin-left:.5rem}
-@media(max-width:1024px){
-  #right-panel{display:none;position:fixed;top:0;right:0;bottom:0;width:280px;z-index:90;box-shadow:-2px 0 12px rgba(0,0,0,.5)}
-  #right-panel.open{display:flex}
-  .panel-toggle{display:inline-block}
-}
-@media(max-width:767px){
-  #sidebar{position:fixed;top:0;left:0;bottom:0;width:100%;z-index:80;display:flex}
-  #sidebar.hidden{display:none}
-  #main{display:none;width:100%}
-  #main.active{display:flex}
-  .mobile-back{display:inline-block}
-  .modal .modal-box{width:92vw;max-width:420px}
-}
-</style></head><body>
-<div id="sidebar">
-  <h1>chait <button class="btn btn-sm" onclick="openNewRoom()">+ Room</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openApiTokens()">API Key</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="doLogout()">Logout</button></h1>
-  <div id="rooms-list"></div>
-</div>
-<div id="main">
-  <div id="no-room">Select a room or create one</div>
-  <div id="room-view" style="display:none;flex:1;flex-direction:column">
-    <div id="room-header">
-      <span><button class="mobile-back" onclick="showSidebar()">&larr;</button><span id="room-title"></span> <span id="room-status-badge" class="room-status"></span></span>
-      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
-    </div>
-    <div id="messages"></div>
-    <div id="input-area">
-      <textarea id="msg-input" rows="2" placeholder="Message as Human (god mode)..."></textarea>
-      <div style="display:flex;flex-direction:column;gap:.3rem">
-        <button class="btn" onclick="sendMessage()">Send</button>
-        <label class="btn btn-sm" style="text-align:center;cursor:pointer">Upload<input type="file" id="file-input" style="display:none" onchange="uploadFile()"></label>
-      </div>
-    </div>
-  </div>
-</div>
-<div id="right-panel">
-  <div><h3>Room Members</h3><div id="agents-list"></div></div>
-  <div><h3>Documents</h3><div id="docs-list"></div></div>
-</div>
-<!-- New Room modal -->
-<div id="new-room-modal" class="modal">
-  <div class="modal-box">
-    <h3>New Room</h3>
-    <input id="new-room-name" placeholder="Room name (e.g. rox-12345)">
-    <textarea id="new-room-topic" rows="4" placeholder="Task description / context for agents (optional)"></textarea>
-    <div style="margin-bottom:.5rem">
-      <label style="color:#94a3b8;font-size:.7rem;display:block;margin-bottom:.25rem">Attach context documents (optional)</label>
-      <input type="file" id="new-room-files" multiple style="font-size:.7rem;color:#94a3b8">
-    </div>
-    <div id="new-room-result" style="display:none">
-      <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Join token (copy this for agents):</div>
-      <div class="token-display" id="new-room-token" onclick="navigator.clipboard.writeText(this.textContent)"></div>
-      <div style="color:#64748b;font-size:.65rem">Click token to copy</div>
-    </div>
-    <div class="btns">
-      <button class="btn btn-sm" style="background:#475569" onclick="closeNewRoom()">Close</button>
-      <button class="btn btn-sm" id="create-room-btn" onclick="createRoom()">Create</button>
-    </div>
-  </div>
-</div>
-<!-- Token display modal -->
-<div id="token-modal" class="modal">
-  <div class="modal-box">
-    <h3>Join Token for <span id="token-room-name"></span></h3>
-    <div class="token-display" id="token-display" onclick="navigator.clipboard.writeText(this.textContent)"></div>
-    <div style="color:#64748b;font-size:.65rem;margin-bottom:.75rem">Click to copy. Give this to agents so they can join this room.</div>
-    <div class="btns"><button class="btn btn-sm" onclick="document.getElementById('token-modal').style.display='none'">Close</button></div>
-  </div>
-</div>
-<!-- DM modal -->
-<div id="dm-modal" class="modal">
-  <div class="modal-box">
-    <h3>DM to <span id="dm-target-name"></span></h3>
-    <textarea id="dm-input" rows="3" placeholder="Private message..."></textarea>
-    <div class="btns">
-      <button class="btn btn-sm" style="background:#475569" onclick="closeDM()">Cancel</button>
-      <button class="btn btn-sm" onclick="sendDM()">Send DM</button>
-    </div>
-  </div>
-</div>
-<!-- API Token modal -->
-<div id="api-token-modal" class="modal">
-  <div class="modal-box">
-    <h3>API Token</h3>
-    <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.5rem">Use this token with launch.sh: <code style="color:#38bdf8">export CHAIT_TOKEN=&lt;token&gt;</code></div>
-    <div id="api-token-list"></div>
-    <div class="btns">
-      <button class="btn btn-sm" style="background:#475569" onclick="document.getElementById('api-token-modal').style.display='none'">Close</button>
-      <button class="btn btn-sm" id="gen-token-btn" onclick="generateApiToken()">Generate Token</button>
-    </div>
-  </div>
-</div>
-<script>
-let currentRoom=null,pollInterval=null,lastTs=null,dmTargetId=null;
-async function api(p,o){const r=await fetch(p,o);if(r.status===303||r.redirected){location='/login';return null}return r.json()}
-async function loadRooms(){
-  const rooms=await api('/ui/api/rooms');if(!rooms)return;
-  document.getElementById('rooms-list').innerHTML=rooms.map(r=>{
-    let sc='status-'+r.status;
-    return `<div class="room-item ${currentRoom===r.name?'active':''}" onclick="selectRoom(${JSON.stringify(r.name)})">
-      <span>${esc(r.name)}</span><span class="room-status ${sc}">${esc(r.status)}</span></div>`
-  }).join('');
-}
-function isMobile(){return window.innerWidth<768}
-function showSidebar(){document.getElementById('sidebar').classList.remove('hidden');document.getElementById('main').classList.remove('active')}
-function showMessages(){document.getElementById('sidebar').classList.add('hidden');document.getElementById('main').classList.add('active')}
-function togglePanel(){document.getElementById('right-panel').classList.toggle('open')}
-async function selectRoom(name){
-  currentRoom=name;lastTs=null;
-  document.getElementById('no-room').style.display='none';
-  document.getElementById('room-view').style.display='flex';
-  document.getElementById('room-title').textContent='#'+name;
-  if(isMobile())showMessages();
-  loadRooms();await loadMessages();await loadRoomDetails();
-  if(pollInterval)clearInterval(pollInterval);pollInterval=setInterval(pollMessages,3000);
-}
-async function loadMessages(){
-  const msgs=await api(`/ui/api/rooms/${currentRoom}/messages`);if(!msgs)return;
-  renderMessages(msgs);if(msgs.length>0)lastTs=msgs[msgs.length-1].created_at;
-}
-async function pollMessages(){
-  if(!currentRoom||!lastTs)return;
-  const msgs=await api(`/ui/api/rooms/${currentRoom}/messages?since=${encodeURIComponent(lastTs)}`);
-  if(!msgs||!msgs.length)return;
-  appendMessages(msgs);lastTs=msgs[msgs.length-1].created_at;loadRoomDetails();
-}
-function renderMessages(msgs){const el=document.getElementById('messages');el.innerHTML=msgs.map(fmtMsg).join('');el.scrollTop=el.scrollHeight}
-function appendMessages(msgs){const el=document.getElementById('messages');el.innerHTML+=msgs.map(fmtMsg).join('');el.scrollTop=el.scrollHeight}
-function fmtMsg(m){
-  const pri=m.priority?' priority':'',badge=m.priority?'<span class="priority-badge">PRIORITY</span>':'';
-  const t=new Date(m.created_at).toLocaleTimeString();
-  return `<div class="msg${pri}"><div class="meta"><span class="name">${esc(m.author_name)}</span> <span class="role">[${esc(m.author_role)}]</span> ${t}${badge}</div><div class="text">${esc(m.text)}</div></div>`;
-}
-function esc(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-async function loadRoomDetails(){
-  const room=await api(`/ui/api/rooms/${currentRoom}/details`);if(!room)return;
-  document.getElementById('room-topic').textContent=room.topic||'';
-  const sb=document.getElementById('room-status-badge');
-  sb.textContent=room.status;sb.className='room-status status-'+room.status;
-  document.getElementById('agents-list').innerHTML=(room.members||[]).map(m=>{
-    const card=m.card||{};const skills=(card.skills||[]).join(', ');
-    return `<div class="agent-card"><div class="agent-name">${esc(m.name)}</div><div class="agent-role">${esc(m.role)}</div>
-      ${card.description?`<div class="agent-skills">${esc(card.description)}</div>`:''}
-      ${skills?`<div class="agent-skills">Skills: ${esc(skills)}</div>`:''}
-      <button class="btn btn-sm dm-btn" onclick="openDM(${JSON.stringify(m.id)},${JSON.stringify(m.name)})">DM</button></div>`;
-  }).join('');
-  const docs=await api(`/ui/api/rooms/${currentRoom}/documents`);
-  document.getElementById('docs-list').innerHTML=(docs||[]).map(d=>
-    `<div class="doc-item"><a href="/api/v1/documents/${encodeURIComponent(d.id)}/download" target="_blank">${esc(d.filename)}</a> <span style="color:#64748b;font-size:.65rem">${(d.size/1024).toFixed(1)}KB</span></div>`
-  ).join('');
-}
-async function sendMessage(){
-  const input=document.getElementById('msg-input'),text=input.value.trim();
-  if(!text||!currentRoom)return;
-  await fetch(`/ui/api/rooms/${currentRoom}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
-  input.value='';await loadMessages();
-}
-async function uploadFile(){
-  const fi=document.getElementById('file-input');if(!fi.files.length||!currentRoom)return;
-  const fd=new FormData();fd.append('file',fi.files[0]);
-  await fetch(`/ui/api/rooms/${currentRoom}/documents`,{method:'POST',body:fd});
-  fi.value='';await loadRoomDetails();
-}
-function openDM(id,name){dmTargetId=id;document.getElementById('dm-target-name').textContent=name;document.getElementById('dm-modal').style.display='flex';document.getElementById('dm-input').focus()}
-function closeDM(){document.getElementById('dm-modal').style.display='none';dmTargetId=null}
-async function sendDM(){
-  const text=document.getElementById('dm-input').value.trim();if(!text||!dmTargetId)return;
-  await fetch(`/ui/api/dm/${dmTargetId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
-  document.getElementById('dm-input').value='';closeDM();
-}
-function openNewRoom(){document.getElementById('new-room-modal').style.display='flex';document.getElementById('new-room-name').focus();document.getElementById('new-room-result').style.display='none';document.getElementById('create-room-btn').style.display='';document.getElementById('new-room-files').value=''}
-function closeNewRoom(){document.getElementById('new-room-modal').style.display='none'}
-async function createRoom(){
-  const name=document.getElementById('new-room-name').value.trim();
-  const topic=document.getElementById('new-room-topic').value.trim();
-  if(!name)return;
-  const btn=document.getElementById('create-room-btn');btn.textContent='Creating...';btn.disabled=true;
-  const r=await fetch('/ui/api/rooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,topic})});
-  const data=await r.json();
-  const files=document.getElementById('new-room-files').files;
-  for(let i=0;i<files.length;i++){const fd=new FormData();fd.append('file',files[i]);await fetch(`/ui/api/rooms/${name}/documents`,{method:'POST',body:fd})}
-  document.getElementById('new-room-token').textContent=data.join_token;
-  document.getElementById('new-room-result').style.display='block';
-  btn.style.display='none';
-  loadRooms();
-}
-async function showJoinToken(){
-  if(!currentRoom)return;
-  const r=await api(`/ui/api/rooms/${currentRoom}/token`);
-  if(!r)return;
-  document.getElementById('token-room-name').textContent=currentRoom;
-  document.getElementById('token-display').textContent=r.join_token;
-  document.getElementById('token-modal').style.display='flex';
-}
-async function openApiTokens(){
-  document.getElementById('api-token-modal').style.display='flex';
-  const tokens=await api('/ui/api/tokens');if(!tokens)return;
-  const el=document.getElementById('api-token-list');
-  if(!tokens.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem;margin-bottom:.5rem">No API tokens yet.</div>';return}
-  el.innerHTML=tokens.map(t=>
-    `<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.4rem">
-      <div class="token-display" style="flex:1;margin:0;font-size:.7rem" onclick="navigator.clipboard.writeText(this.textContent)">${esc(t.token)}</div>
-      <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="revokeApiToken(${JSON.stringify(t.id)})">Revoke</button>
-    </div>`
-  ).join('');
-}
-async function generateApiToken(){
-  const r=await fetch('/ui/api/tokens',{method:'POST'});const data=await r.json();
-  openApiTokens();
-}
-async function revokeApiToken(id){
-  await fetch('/ui/api/tokens/'+id,{method:'DELETE'});
-  openApiTokens();
-}
-document.getElementById('msg-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});
-async function doLogout(){await fetch('/logout',{method:'POST'});location='/login'}
-loadRooms();setInterval(loadRooms,10000);
-</script></body></html>"""
+DASHBOARD_HTML = (_TEMPLATE_DIR / "dashboard.html").read_text()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1001,7 +798,12 @@ async def ui_create_room(request: Request, session: str = Depends(require_human)
     db = await get_db()
     existing = await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,))
     if existing:
-        return {"id": dict(existing[0])["id"], "name": name, "join_token": dict(existing[0])["join_token"], "existing": True}
+        return {
+            "id": dict(existing[0])["id"],
+            "name": name,
+            "join_token": dict(existing[0])["join_token"],
+            "existing": True,
+        }
     room_id = _uid()
     join_token = f"chait-{secrets.token_hex(16)}"
     await db.execute(
@@ -1037,10 +839,13 @@ async def ui_messages(room_name: str, since: Optional[str] = None, session: str 
     room_id = dict(rows[0])["id"]
     if since:
         msgs = await db.execute_fetchall(
-            "SELECT * FROM messages WHERE room_id = ? AND created_at > ? ORDER BY created_at LIMIT 200", (room_id, since))
+            "SELECT * FROM messages WHERE room_id = ? AND created_at > ? ORDER BY created_at LIMIT 200",
+            (room_id, since),
+        )
     else:
         msgs = await db.execute_fetchall(
-            "SELECT * FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT 200", (room_id,))
+            "SELECT * FROM messages WHERE room_id = ? ORDER BY created_at DESC LIMIT 200", (room_id,)
+        )
         msgs = list(reversed(msgs))
     return [_msg_dict(m) for m in msgs]
 
@@ -1057,7 +862,15 @@ async def ui_room_details(room_name: str, session: str = Depends(require_human))
         "SELECT a.id, a.name, a.role, a.card FROM agents a JOIN room_members rm ON a.id = rm.agent_id WHERE rm.room_id = ?",
         (room["id"],),
     )
-    room["members"] = [{"id": dict(m)["id"], "name": dict(m)["name"], "role": dict(m)["role"], "card": _parse_card(dict(m).get("card"))} for m in members]
+    room["members"] = [
+        {
+            "id": dict(m)["id"],
+            "name": dict(m)["name"],
+            "role": dict(m)["role"],
+            "card": _parse_card(dict(m).get("card")),
+        }
+        for m in members
+    ]
     return room
 
 
@@ -1177,5 +990,6 @@ async def ui_revoke_api_token(token_id: str, session: str = Depends(require_huma
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
+
     host = os.getenv("CHAIT_HOST", "0.0.0.0")
     uvicorn.run(app, host=host, port=PORT, log_level="info")

@@ -4,6 +4,7 @@ Each test simulates scripted agent interactions against the server via TestClien
 (in-memory, no running server). Threading is used for concurrent agents and
 long-poll testing.
 """
+
 import sys
 import threading
 import time
@@ -92,10 +93,7 @@ def test_multi_agent_room_conversation(client):
     # B and C poll unread — both see A's message
     for ag in [b, c]:
         data = _unread(client, ag["token"])
-        assert any(
-            m["text"] == "Here are the mockups" and m["room"] == "project-x"
-            for m in data["room_messages"]
-        )
+        assert any(m["text"] == "Here are the mockups" and m["room"] == "project-x" for m in data["room_messages"])
 
     # B replies
     _post(client, "project-x", "Looks good, implementing", b["token"])
@@ -106,9 +104,7 @@ def test_multi_agent_room_conversation(client):
         assert any(m["text"] == "Looks good, implementing" for m in data["room_messages"])
 
     # All messages in correct order with correct authors
-    msgs = client.get(
-        "/api/v1/rooms/project-x/messages", headers=_auth(a["token"])
-    ).json()
+    msgs = client.get("/api/v1/rooms/project-x/messages", headers=_auth(a["token"])).json()
     assert len(msgs) == 2
     assert msgs[0]["author_name"] == "Alice"
     assert msgs[1]["author_name"] == "Bob"
@@ -129,9 +125,7 @@ def test_long_poll_notification_delivery(client):
     def poll():
         try:
             t0 = time.monotonic()
-            r = client.get(
-                "/api/v1/me/unread", params={"wait": 10}, headers=_auth(b["token"])
-            )
+            r = client.get("/api/v1/me/unread", params={"wait": 10}, headers=_auth(b["token"]))
             result["elapsed"] = time.monotonic() - t0
             result["data"] = r.json()
         except Exception as e:
@@ -163,9 +157,7 @@ def test_human_god_mode_priority(client):
     _post(client, "priority-room", "agent message", a["token"])
 
     # Human posts priority message (session cookie already set by _login)
-    r = client.post(
-        "/ui/api/rooms/priority-room/messages", json={"text": "urgent from human"}
-    )
+    r = client.post("/ui/api/rooms/priority-room/messages", json={"text": "urgent from human"})
     assert r.status_code == 200
     assert r.json()["priority"] is True
 
@@ -193,17 +185,12 @@ def test_dm_routing(client):
     c = _join(client, room["join_token"], "Carol")
 
     # A sends DM to B
-    r = client.post(
-        f"/api/v1/dm/{b['id']}", json={"text": "private to Bob"}, headers=_auth(a["token"])
-    )
+    r = client.post(f"/api/v1/dm/{b['id']}", json={"text": "private to Bob"}, headers=_auth(a["token"]))
     assert r.status_code == 200
 
     # B sees the DM
     b_data = _unread(client, b["token"])
-    assert any(
-        d["text"] == "private to Bob" and d["from_id"] == a["id"]
-        for d in b_data["dms"]
-    )
+    assert any(d["text"] == "private to Bob" and d["from_id"] == a["id"] for d in b_data["dms"])
 
     # C does NOT see the DM
     c_data = _unread(client, c["token"])
@@ -229,9 +216,7 @@ def test_room_lifecycle_status_transitions(client):
 
     transitions = ["waiting-for-input", "active", "completed"]
     for status in transitions:
-        r = client.post(
-            "/api/v1/rooms/lifecycle-room/status", json={"status": status}, headers=h
-        )
+        r = client.post("/api/v1/rooms/lifecycle-room/status", json={"status": status}, headers=h)
         assert r.status_code == 200
         assert r.json()["status"] == status
 
@@ -240,9 +225,7 @@ def test_room_lifecycle_status_transitions(client):
         assert room_data["status"] == status
 
     # Invalid status → 400
-    r = client.post(
-        "/api/v1/rooms/lifecycle-room/status", json={"status": "nonsense"}, headers=h
-    )
+    r = client.post("/api/v1/rooms/lifecycle-room/status", json={"status": "nonsense"}, headers=h)
     assert r.status_code == 400
 
 
@@ -301,9 +284,7 @@ def test_document_sharing(client):
     assert doc["size"] == len(content)
 
     # B lists documents
-    docs = client.get(
-        "/api/v1/rooms/docs-room/documents", headers=_auth(b["token"])
-    ).json()
+    docs = client.get("/api/v1/rooms/docs-room/documents", headers=_auth(b["token"])).json()
     assert len(docs) == 1
     assert docs[0]["filename"] == "design.md"
     assert docs[0]["uploaded_by"] == a["id"]
@@ -330,9 +311,7 @@ def test_concurrent_message_ordering(client):
         except Exception as e:
             errors.append(e)
 
-    threads = [
-        threading.Thread(target=post_msg, args=(a, i)) for i, a in enumerate(agents)
-    ]
+    threads = [threading.Thread(target=post_msg, args=(a, i)) for i, a in enumerate(agents)]
     for t in threads:
         t.start()
     for t in threads:
@@ -340,9 +319,7 @@ def test_concurrent_message_ordering(client):
 
     assert not errors, f"Thread errors: {errors}"
 
-    msgs = client.get(
-        "/api/v1/rooms/concurrent/messages", headers=_auth(agents[0]["token"])
-    ).json()
+    msgs = client.get("/api/v1/rooms/concurrent/messages", headers=_auth(agents[0]["token"])).json()
     assert len(msgs) == 5
 
     # Monotonically non-decreasing timestamps
@@ -358,9 +335,7 @@ def test_human_dm_to_agent(client):
     room = _create_room(client, "dm-room")
     agent = _join(client, room["join_token"], "DevAgent", "developer")
 
-    r = client.post(
-        f"/ui/api/dm/{agent['id']}", json={"text": "please fix the bug"}
-    )
+    r = client.post(f"/ui/api/dm/{agent['id']}", json={"text": "please fix the bug"})
     assert r.status_code == 200
     assert r.json()["priority"] is True
 
@@ -381,15 +356,24 @@ def test_full_workflow_simulation(client):
     _login(client)
     room = _create_room(client, "sprint-task", topic="Build widget API")
     pm = _join(
-        client, room["join_token"], "PM", "product-manager",
+        client,
+        room["join_token"],
+        "PM",
+        "product-manager",
         {"description": "Product planning", "skills": ["requirements", "coordination"]},
     )
     lead = _join(
-        client, room["join_token"], "Lead", "tech-lead",
+        client,
+        room["join_token"],
+        "Lead",
+        "tech-lead",
         {"description": "Architecture", "skills": ["design", "code-review"]},
     )
     dev = _join(
-        client, room["join_token"], "Dev", "developer",
+        client,
+        room["join_token"],
+        "Dev",
+        "developer",
         {"description": "Implementation", "skills": ["go", "testing"]},
     )
 
@@ -440,23 +424,17 @@ def test_full_workflow_simulation(client):
     assert r.status_code == 200
 
     # --- Final assertions ---
-    msgs = client.get(
-        "/api/v1/rooms/sprint-task/messages", headers=_auth(pm["token"])
-    ).json()
+    msgs = client.get("/api/v1/rooms/sprint-task/messages", headers=_auth(pm["token"])).json()
     assert len(msgs) == 4
     assert [m["author_name"] for m in msgs] == ["PM", "Lead", "Dev", "Dev"]
     for i in range(1, len(msgs)):
         assert msgs[i]["created_at"] >= msgs[i - 1]["created_at"]
 
-    docs = client.get(
-        "/api/v1/rooms/sprint-task/documents", headers=_auth(pm["token"])
-    ).json()
+    docs = client.get("/api/v1/rooms/sprint-task/documents", headers=_auth(pm["token"])).json()
     assert len(docs) == 1
     assert docs[0]["filename"] == "api-design.md"
 
-    room_data = client.get(
-        "/api/v1/rooms/sprint-task", headers=_auth(pm["token"])
-    ).json()
+    room_data = client.get("/api/v1/rooms/sprint-task", headers=_auth(pm["token"])).json()
     assert room_data["status"] == "completed"
     assert {m["name"] for m in room_data["members"]} == {"PM", "Lead", "Dev"}
 
@@ -479,9 +457,7 @@ def test_human_document_upload_visible_to_agents(client):
     assert doc["filename"] == "context.txt"
 
     # Agent sees it in listing
-    docs = client.get(
-        "/api/v1/rooms/human-docs/documents", headers=_auth(agent["token"])
-    ).json()
+    docs = client.get("/api/v1/rooms/human-docs/documents", headers=_auth(agent["token"])).json()
     assert len(docs) == 1
     assert docs[0]["filename"] == "context.txt"
     assert docs[0]["uploaded_by"] == "human"
@@ -516,7 +492,8 @@ def test_document_upload_notifies_via_unread(client):
 
     # B polls unread — should see the document
     unread = client.get(
-        "/api/v1/me/unread", headers=_auth(b["token"]),
+        "/api/v1/me/unread",
+        headers=_auth(b["token"]),
         params={"since": before},
     ).json()
     assert len(unread["documents"]) == 1
@@ -525,7 +502,8 @@ def test_document_upload_notifies_via_unread(client):
 
     # A should NOT see own upload in unread
     unread_a = client.get(
-        "/api/v1/me/unread", headers=_auth(a["token"]),
+        "/api/v1/me/unread",
+        headers=_auth(a["token"]),
         params={"since": before},
     ).json()
     assert len(unread_a["documents"]) == 0
@@ -543,7 +521,8 @@ def test_document_upload_wakes_long_poll(client):
     def poll_unread():
         start = time.time()
         r = client.get(
-            "/api/v1/me/unread", headers=_auth(b["token"]),
+            "/api/v1/me/unread",
+            headers=_auth(b["token"]),
             params={"wait": "10"},
         )
         result["elapsed"] = time.time() - start

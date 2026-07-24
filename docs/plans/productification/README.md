@@ -1,6 +1,6 @@
 # chait Productification Plan
 
-43 implementation plans organized in 6 waves, ordered by priority. Each plan is self-contained with problem description, implementation steps, and verification instructions.
+44 implementation plans organized in 6 waves, ordered by priority. Each plan is self-contained with problem description, implementation steps, and verification instructions.
 
 Execute plans sequentially within each wave. Waves are ordered so earlier ones unblock later ones. Within a wave, plans can be done in any order unless noted.
 
@@ -55,8 +55,11 @@ Logging, health checks, Docker hardening, CI. Total effort: ~half day.
 | 19 | [Default password guard](19-default-password-guard.md) | critical | tiny | security |
 | 20 | [CI versioned image tags](20-ci-versioned-tags.md) | critical | small | ops |
 | 21 | [CI linting](21-ci-linting.md) | important | small | ops |
+| 44 | [CI/CD pipeline (comprehensive)](44-ci-setup.md) | critical | medium | ops |
 
 **Note**: Plan 17 (Dockerfile) depends on plan 14 (extract templates) for the `COPY templates/` line. Do 14 first.
+
+**Note**: Plan 44 supersedes plans 20 and 21. It includes versioned tags, linting, and more. The actual workflow file (`.github/workflows/ci.yml`) and `ruff.toml` are committed alongside the plan — ready to use immediately.
 
 ---
 
@@ -116,9 +119,9 @@ Concurrency, efficiency, data integrity. Total effort: ~1 day.
 
 ## Quick Reference
 
-**Total plans**: 43
-**Critical**: 19 | **High/Important**: 24
-**Tiny effort**: 13 | **Small**: 14 | **Medium**: 13 | **Large**: 3
+**Total plans**: 44
+**Critical**: 20 | **High/Important**: 24
+**Tiny effort**: 13 | **Small**: 14 | **Medium**: 14 | **Large**: 3
 
 **Fastest wins** (plans that are 1-3 lines and critical):
 01, 02, 04, 16, 25, 34

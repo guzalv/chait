@@ -1,4 +1,5 @@
 """Tests for chait server API."""
+
 import sys
 import time
 from datetime import datetime, timezone
@@ -319,9 +320,7 @@ class TestDMs:
         ts = client.get(f"/api/v1/dm/{a2['id']}", headers=_auth(a1["token"])).json()[0]["created_at"]
         time.sleep(0.02)
         client.post(f"/api/v1/dm/{a2['id']}", json={"text": "new"}, headers=_auth(a1["token"]))
-        filtered = client.get(
-            f"/api/v1/dm/{a2['id']}", params={"since": ts}, headers=_auth(a1["token"])
-        ).json()
+        filtered = client.get(f"/api/v1/dm/{a2['id']}", params={"since": ts}, headers=_auth(a1["token"])).json()
         assert len(filtered) == 1
         assert filtered[0]["text"] == "new"
 
@@ -360,9 +359,7 @@ class TestUnread:
         future = datetime.now(timezone.utc).isoformat()
         time.sleep(0.02)
         t0 = time.monotonic()
-        unread = client.get(
-            "/api/v1/me/unread", params={"wait": 1, "since": future}, headers=_auth(a1["token"])
-        ).json()
+        unread = client.get("/api/v1/me/unread", params={"wait": 1, "since": future}, headers=_auth(a1["token"])).json()
         elapsed = time.monotonic() - t0
         assert elapsed >= 0.9
         assert unread["room_messages"] == []
@@ -448,9 +445,7 @@ class TestHumanUI:
         assert r.json()["filename"] == "ui.txt"
 
     def test_ui_invalid_login(self, client):
-        r = client.post(
-            "/login", data={"user": "admin", "password": "wrong"}, follow_redirects=False
-        )
+        r = client.post("/login", data={"user": "admin", "password": "wrong"}, follow_redirects=False)
         assert r.status_code == 401
 
 

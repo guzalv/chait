@@ -1,0 +1,9 @@
+line-length = 120
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # codebase uses long lines for SQL queries and embedded HTML
+
+[lint.per-file-ignores]
+"tests/test_ui.py" = ["E401", "E741", "F401", "I001"]  # pre-existing; fix separately
