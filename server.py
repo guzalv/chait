@@ -308,9 +308,18 @@ async def join_with_token(request: Request):
         (room["id"], agent_id, _now()),
     )
     await db.commit()
+    # Include room context so agents know what they're joining
+    docs = await db.execute_fetchall(
+        "SELECT id, filename, size, created_at FROM documents WHERE room_id = ? ORDER BY created_at",
+        (room["id"],),
+    )
     return {
         "id": agent_id, "name": name, "role": role, "token": agent_token,
         "room": room["name"], "card": card,
+        "context": {
+            "topic": room.get("topic", ""),
+            "documents": [dict(d) for d in docs],
+        },
     }
 
 
@@ -692,7 +701,11 @@ body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f
   <div class="modal-box">
     <h3>New Room</h3>
     <input id="new-room-name" placeholder="Room name (e.g. rox-12345)">
-    <input id="new-room-topic" placeholder="Topic / task description">
+    <textarea id="new-room-topic" rows="4" placeholder="Task description / context for agents (optional)"></textarea>
+    <div style="margin-bottom:.5rem">
+      <label style="color:#94a3b8;font-size:.7rem;display:block;margin-bottom:.25rem">Attach context documents (optional)</label>
+      <input type="file" id="new-room-files" multiple style="font-size:.7rem;color:#94a3b8">
+    </div>
     <div id="new-room-result" style="display:none">
       <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Join token (copy this for agents):</div>
       <div class="token-display" id="new-room-token" onclick="navigator.clipboard.writeText(this.textContent)"></div>
@@ -797,17 +810,20 @@ async function sendDM(){
   await fetch(`/ui/api/dm/${dmTargetId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
   document.getElementById('dm-input').value='';closeDM();
 }
-function openNewRoom(){document.getElementById('new-room-modal').style.display='flex';document.getElementById('new-room-name').focus();document.getElementById('new-room-result').style.display='none';document.getElementById('create-room-btn').style.display=''}
+function openNewRoom(){document.getElementById('new-room-modal').style.display='flex';document.getElementById('new-room-name').focus();document.getElementById('new-room-result').style.display='none';document.getElementById('create-room-btn').style.display='';document.getElementById('new-room-files').value=''}
 function closeNewRoom(){document.getElementById('new-room-modal').style.display='none'}
 async function createRoom(){
   const name=document.getElementById('new-room-name').value.trim();
   const topic=document.getElementById('new-room-topic').value.trim();
   if(!name)return;
+  const btn=document.getElementById('create-room-btn');btn.textContent='Creating...';btn.disabled=true;
   const r=await fetch('/ui/api/rooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,topic})});
   const data=await r.json();
+  const files=document.getElementById('new-room-files').files;
+  for(let i=0;i<files.length;i++){const fd=new FormData();fd.append('file',files[i]);await fetch(`/ui/api/rooms/${name}/documents`,{method:'POST',body:fd})}
   document.getElementById('new-room-token').textContent=data.join_token;
   document.getElementById('new-room-result').style.display='block';
-  document.getElementById('create-room-btn').style.display='none';
+  btn.style.display='none';
   loadRooms();
 }
 async function showJoinToken(){

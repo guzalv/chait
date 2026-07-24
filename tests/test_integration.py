@@ -565,3 +565,45 @@ def test_document_upload_wakes_long_poll(client):
     assert result["elapsed"] < 5, f"Long-poll took {result['elapsed']:.1f}s, expected < 5s"
     assert len(result["unread"]["documents"]) == 1
     assert result["unread"]["documents"][0]["filename"] == "data.csv"
+
+
+# ---------------------------------------------------------------------------
+# 14. Join response includes room context (topic + documents)
+# ---------------------------------------------------------------------------
+def test_join_returns_room_context(client):
+    _login(client)
+    room = _create_room(client, "ctx-room", topic="Design a caching layer for the API")
+
+    # Upload context docs before any agent joins
+    client.post(
+        "/ui/api/rooms/ctx-room/documents",
+        files={"file": ("spec.md", b"# Caching Spec\n\nRequirements...", "text/markdown")},
+    )
+    client.post(
+        "/ui/api/rooms/ctx-room/documents",
+        files={"file": ("diagram.png", b"\x89PNG fake", "image/png")},
+    )
+
+    # Agent joins — should get topic + document list
+    agent = _join(client, room["join_token"], "Dev")
+    assert "context" in agent
+    assert agent["context"]["topic"] == "Design a caching layer for the API"
+    assert len(agent["context"]["documents"]) == 2
+    filenames = {d["filename"] for d in agent["context"]["documents"]}
+    assert filenames == {"spec.md", "diagram.png"}
+
+
+def test_join_returns_empty_context_when_no_docs(client):
+    _login(client)
+    room = _create_room(client, "empty-ctx", topic="Quick sync")
+    agent = _join(client, room["join_token"], "Dev")
+    assert agent["context"]["topic"] == "Quick sync"
+    assert agent["context"]["documents"] == []
+
+
+def test_join_returns_empty_context_when_no_topic(client):
+    _login(client)
+    room = _create_room(client, "no-topic")
+    agent = _join(client, room["join_token"], "Dev")
+    assert agent["context"]["topic"] == ""
+    assert agent["context"]["documents"] == []
