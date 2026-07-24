@@ -455,6 +455,117 @@ class TestHumanUI:
 
 
 # ---------------------------------------------------------------------------
+# API room creation (CHAIT_TOKEN)
+# ---------------------------------------------------------------------------
+class TestAPICreateRoom:
+    def _make_api_token(self, client):
+        """Generate an API token via UI (requires human session)."""
+        r = client.post("/ui/api/tokens")
+        assert r.status_code == 200
+        return r.json()["token"]
+
+    def test_create_room_with_api_token(self, client):
+        _login(client)
+        token = self._make_api_token(client)
+        r = client.post(
+            "/api/v1/rooms",
+            json={"name": "api-room", "topic": "test topic"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["name"] == "api-room"
+        assert data["topic"] == "test topic"
+        assert data["join_token"].startswith("chait-")
+        assert data["status"] == "active"
+
+    def test_create_room_invalid_token(self, client):
+        r = client.post(
+            "/api/v1/rooms",
+            json={"name": "x"},
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+        assert r.status_code == 401
+
+    def test_create_room_no_auth_header(self, client):
+        r = client.post("/api/v1/rooms", json={"name": "x"})
+        assert r.status_code == 401
+
+    def test_create_room_missing_name(self, client):
+        _login(client)
+        token = self._make_api_token(client)
+        r = client.post(
+            "/api/v1/rooms",
+            json={"topic": "no name"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 400
+
+    def test_create_room_duplicate_returns_existing(self, client):
+        _login(client)
+        token = self._make_api_token(client)
+        h = {"Authorization": f"Bearer {token}"}
+        first = client.post("/api/v1/rooms", json={"name": "dup"}, headers=h).json()
+        second = client.post("/api/v1/rooms", json={"name": "dup"}, headers=h).json()
+        assert second["id"] == first["id"]
+        assert second.get("existing") is True
+
+    def test_created_room_is_joinable(self, client):
+        _login(client)
+        token = self._make_api_token(client)
+        room = client.post(
+            "/api/v1/rooms",
+            json={"name": "joinable"},
+            headers={"Authorization": f"Bearer {token}"},
+        ).json()
+        agent = _join(client, room["join_token"], name="bot")
+        assert agent["room"] == "joinable"
+
+    def test_revoked_token_rejected(self, client):
+        _login(client)
+        data = client.post("/ui/api/tokens").json()
+        client.delete(f"/ui/api/tokens/{data['id']}")
+        r = client.post(
+            "/api/v1/rooms",
+            json={"name": "x"},
+            headers={"Authorization": f"Bearer {data['token']}"},
+        )
+        assert r.status_code == 401
+
+
+class TestAPITokenManagement:
+    def test_generate_token(self, client):
+        _login(client)
+        r = client.post("/ui/api/tokens")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["token"].startswith("chait-api-")
+        assert data["id"]
+
+    def test_list_tokens(self, client):
+        _login(client)
+        client.post("/ui/api/tokens")
+        client.post("/ui/api/tokens")
+        tokens = client.get("/ui/api/tokens").json()
+        assert len(tokens) == 2
+
+    def test_revoke_token(self, client):
+        _login(client)
+        data = client.post("/ui/api/tokens").json()
+        r = client.delete(f"/ui/api/tokens/{data['id']}")
+        assert r.status_code == 200
+        assert r.json()["revoked"] is True
+        tokens = client.get("/ui/api/tokens").json()
+        assert len(tokens) == 0
+
+    def test_requires_session(self, client):
+        r = client.post("/ui/api/tokens", follow_redirects=False)
+        assert r.status_code == 303
+        r = client.get("/ui/api/tokens", follow_redirects=False)
+        assert r.status_code == 303
+
+
+# ---------------------------------------------------------------------------
 # Instructions
 # ---------------------------------------------------------------------------
 class TestInstructions:

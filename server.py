@@ -124,6 +124,11 @@ async def init_db():
             token TEXT PRIMARY KEY,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS api_tokens (
+            id TEXT PRIMARY KEY,
+            token TEXT NOT NULL UNIQUE,
+            created_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_dms_to ON dms(to_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_dms_from ON dms(from_id, created_at);
@@ -167,6 +172,19 @@ async def auth_agent(request: Request) -> dict:
     if not agent:
         raise HTTPException(401, "Invalid token")
     return agent
+
+
+async def auth_master_token(request: Request) -> str:
+    """Validate Bearer token against api_tokens table."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "Missing Bearer token")
+    token = auth[7:]
+    db = await get_db()
+    rows = await db.execute_fetchall("SELECT id FROM api_tokens WHERE token = ?", (token,))
+    if not rows:
+        raise HTTPException(401, "Invalid API token")
+    return token
 
 
 async def auth_human(request: Request) -> Optional[str]:
@@ -321,6 +339,31 @@ async def join_with_token(request: Request):
             "documents": [dict(d) for d in docs],
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Room creation via master token
+# ---------------------------------------------------------------------------
+@app.post("/api/v1/rooms")
+async def api_create_room(request: Request, _token: str = Depends(auth_master_token)):
+    """Create a room using an API token. Returns room info + join_token."""
+    body = await request.json()
+    name = body.get("name", "")
+    topic = body.get("topic", "")
+    if not name:
+        raise HTTPException(400, "name required")
+    db = await get_db()
+    existing = await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,))
+    if existing:
+        return {"id": dict(existing[0])["id"], "name": name, "join_token": dict(existing[0])["join_token"], "existing": True}
+    room_id = _uid()
+    join_token = f"chait-{secrets.token_hex(16)}"
+    await db.execute(
+        "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
+        (room_id, name, topic, join_token, _now()),
+    )
+    await db.commit()
+    return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
 
 
 # ---------------------------------------------------------------------------
@@ -687,7 +730,7 @@ body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f
 }
 </style></head><body>
 <div id="sidebar">
-  <h1>chait <button class="btn btn-sm" onclick="openNewRoom()">+ Room</button></h1>
+  <h1>chait <button class="btn btn-sm" onclick="openNewRoom()">+ Room</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openApiTokens()">API Key</button></h1>
   <div id="rooms-list"></div>
 </div>
 <div id="main">
@@ -749,6 +792,18 @@ body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f
     <div class="btns">
       <button class="btn btn-sm" style="background:#475569" onclick="closeDM()">Cancel</button>
       <button class="btn btn-sm" onclick="sendDM()">Send DM</button>
+    </div>
+  </div>
+</div>
+<!-- API Token modal -->
+<div id="api-token-modal" class="modal">
+  <div class="modal-box">
+    <h3>API Token</h3>
+    <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.5rem">Use this token with launch.sh: <code style="color:#38bdf8">export CHAIT_TOKEN=&lt;token&gt;</code></div>
+    <div id="api-token-list"></div>
+    <div class="btns">
+      <button class="btn btn-sm" style="background:#475569" onclick="document.getElementById('api-token-modal').style.display='none'">Close</button>
+      <button class="btn btn-sm" id="gen-token-btn" onclick="generateApiToken()">Generate Token</button>
     </div>
   </div>
 </div>
@@ -853,6 +908,26 @@ async function showJoinToken(){
   document.getElementById('token-room-name').textContent=currentRoom;
   document.getElementById('token-display').textContent=r.join_token;
   document.getElementById('token-modal').style.display='flex';
+}
+async function openApiTokens(){
+  document.getElementById('api-token-modal').style.display='flex';
+  const tokens=await api('/ui/api/tokens');if(!tokens)return;
+  const el=document.getElementById('api-token-list');
+  if(!tokens.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem;margin-bottom:.5rem">No API tokens yet.</div>';return}
+  el.innerHTML=tokens.map(t=>
+    `<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.4rem">
+      <div class="token-display" style="flex:1;margin:0;font-size:.7rem" onclick="navigator.clipboard.writeText(this.textContent)">${t.token}</div>
+      <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="revokeApiToken('${t.id}')">Revoke</button>
+    </div>`
+  ).join('');
+}
+async function generateApiToken(){
+  const r=await fetch('/ui/api/tokens',{method:'POST'});const data=await r.json();
+  openApiTokens();
+}
+async function revokeApiToken(id){
+  await fetch('/ui/api/tokens/'+id,{method:'DELETE'});
+  openApiTokens();
 }
 document.getElementById('msg-input').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}});
 loadRooms();setInterval(loadRooms,10000);
@@ -1011,6 +1086,38 @@ async def ui_send_dm(target_id: str, request: Request, session: str = Depends(re
     await db.commit()
     _notify_agent(target_id)
     return {"id": dm_id, "to_id": target_id, "text": text, "priority": True}
+
+
+# ---------------------------------------------------------------------------
+# API tokens management (human-only)
+# ---------------------------------------------------------------------------
+@app.post("/ui/api/tokens")
+async def ui_create_api_token(session: str = Depends(require_human)):
+    """Generate a new API token for CLI use (e.g. launch.sh)."""
+    db = await get_db()
+    token_id = _uid()
+    token = f"chait-api-{secrets.token_hex(24)}"
+    await db.execute(
+        "INSERT INTO api_tokens (id, token, created_at) VALUES (?, ?, ?)",
+        (token_id, token, _now()),
+    )
+    await db.commit()
+    return {"id": token_id, "token": token}
+
+
+@app.get("/ui/api/tokens")
+async def ui_list_api_tokens(session: str = Depends(require_human)):
+    db = await get_db()
+    rows = await db.execute_fetchall("SELECT id, token, created_at FROM api_tokens ORDER BY created_at")
+    return [{"id": dict(r)["id"], "token": dict(r)["token"], "created_at": dict(r)["created_at"]} for r in rows]
+
+
+@app.delete("/ui/api/tokens/{token_id}")
+async def ui_revoke_api_token(token_id: str, session: str = Depends(require_human)):
+    db = await get_db()
+    await db.execute("DELETE FROM api_tokens WHERE id = ?", (token_id,))
+    await db.commit()
+    return {"revoked": True, "id": token_id}
 
 
 # ---------------------------------------------------------------------------

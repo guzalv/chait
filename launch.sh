@@ -2,17 +2,23 @@
 # chait launch — spawn a team of AI agents collaborating on a task.
 #
 # Usage:
-#   ./launch.sh                          # interactive
-#   ./launch.sh --task "implement rate limiting" --room rox-123
+#   ./launch.sh --task "implement rate limiting"       # auto-creates room (needs CHAIT_TOKEN)
+#   ./launch.sh --task "..." --room my-room            # custom room name
+#   ./launch.sh --token <join-token> --task "..."      # existing room (no CHAIT_TOKEN needed)
 #   ./launch.sh --task "..." --team "pm,lead,dev"
 #   ./launch.sh --task "..." --team "pm:Alice,lead:Bob,dev:Carol"
 #   ./launch.sh --task "..." --context "~/sw/myproject"
 #
+# Environment:
+#   CHAIT_TOKEN        API token for creating rooms (generate in chait web UI)
+#   CHAIT_SERVER       Server URL (default: http://localhost:3100)
+#
 # Options:
-#   --token TOKEN      Join token from the chait UI (required)
+#   --token TOKEN      Join token for an existing room (skips room creation)
+#   --room NAME        Room name when auto-creating (default: auto-generated)
 #   --task TEXT         Task description (prompted if omitted)
 #   --task-file FILE   Read task description from file (for long/multiline tasks)
-#   --server URL       Chait server URL (default: http://localhost:3100)
+#   --server URL       Chait server URL (default: $CHAIT_SERVER or http://localhost:3100)
 #   --team SPEC        Comma-separated roles or role:name pairs
 #                      (default: pm,lead,principal,senior)
 #   --context PATH     Working directory for agents (default: cwd)
@@ -28,6 +34,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 SERVER="${CHAIT_SERVER:-http://localhost:3100}"
 JOIN_TOKEN=""
+ROOM_NAME=""
 TEAM_SPEC=""
 TASK=""
 CONTEXT="$(pwd)"
@@ -65,6 +72,7 @@ declare -A ROLE_CARDS=(
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --token)    JOIN_TOKEN="$2"; shift 2 ;;
+    --room)     ROOM_NAME="$2"; shift 2 ;;
     --task)     TASK="$2"; shift 2 ;;
     --task-file) TASK="$(cat "$2")"; shift 2 ;;
     --server)   SERVER="$2"; shift 2 ;;
@@ -83,24 +91,49 @@ done
 # ---------------------------------------------------------------------------
 # Interactive prompts for missing values
 # ---------------------------------------------------------------------------
-if [[ -z "$JOIN_TOKEN" ]]; then
+if [[ -z "$JOIN_TOKEN" && -n "${CHAIT_TOKEN:-}" ]]; then
+  # Auto-create room via API using master token
+  if [[ -z "$ROOM_NAME" ]]; then
+    ROOM_NAME="room-$(date +%Y%m%d-%H%M%S)"
+  fi
+  # Collect task first so we can use it as the room topic
+  if [[ -z "$TASK" ]]; then
+    echo "Task description (paste multiline text, then press Ctrl+D when done):"
+    TASK="$(cat)"
+    TASK="$(echo "$TASK" | sed '/^$/d')"
+    [[ -z "$TASK" ]] && { echo "Task required."; exit 1; }
+  fi
+  ROOM_RESP=$(curl -sf -X POST "$SERVER/api/v1/rooms" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $CHAIT_TOKEN" \
+    -d "{\"name\": \"$ROOM_NAME\", \"topic\": $(echo "$TASK" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}" 2>/dev/null) || {
+    echo "Error: failed to create room (server: $SERVER). Is CHAIT_TOKEN correct?"
+    exit 1
+  }
+  JOIN_TOKEN=$(echo "$ROOM_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['join_token'])")
+  ROOM=$(echo "$ROOM_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+  echo "Created room: $ROOM"
+elif [[ -z "$JOIN_TOKEN" ]]; then
   echo "=== chait — team launcher ==="
   echo ""
-  echo "Create a room in the chait web UI first, then paste the join token here."
+  echo "Tip: set CHAIT_TOKEN env var to skip this step (auto-creates rooms)."
+  echo "Otherwise, create a room in the chait web UI and paste the join token."
   read -rp "Join token: " JOIN_TOKEN
-  [[ -z "$JOIN_TOKEN" ]] && { echo "Join token required. Create a room in the UI first."; exit 1; }
+  [[ -z "$JOIN_TOKEN" ]] && { echo "Join token required. Set CHAIT_TOKEN or create a room in the UI."; exit 1; }
 fi
 
-# Resolve room name from join token
-ROOM_INFO=$(curl -sf -X POST "$SERVER/api/v1/join" \
-  -H "Content-Type: application/json" \
-  -d "{\"join_token\": \"$JOIN_TOKEN\", \"name\": \"__probe__\", \"role\": \"probe\"}" 2>/dev/null) || {
-  echo "Error: invalid join token or server unreachable ($SERVER)"
-  exit 1
-}
-ROOM=$(echo "$ROOM_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['room'])")
-# Delete the probe agent (it registered but we don't need it)
-# No delete endpoint, but it's harmless — just a DB row
+if [[ -z "${ROOM:-}" ]]; then
+  # Resolve room name from join token
+  ROOM_INFO=$(curl -sf -X POST "$SERVER/api/v1/join" \
+    -H "Content-Type: application/json" \
+    -d "{\"join_token\": \"$JOIN_TOKEN\", \"name\": \"__probe__\", \"role\": \"probe\"}" 2>/dev/null) || {
+    echo "Error: invalid join token or server unreachable ($SERVER)"
+    exit 1
+  }
+  ROOM=$(echo "$ROOM_INFO" | python3 -c "import sys,json; print(json.load(sys.stdin)['room'])")
+  # Delete the probe agent (it registered but we don't need it)
+  # No delete endpoint, but it's harmless — just a DB row
+fi
 
 if [[ -z "$TASK" ]]; then
   echo ""
