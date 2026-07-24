@@ -971,6 +971,45 @@ async def ui_send_dm(target_id: str, request: Request, session: str = Depends(re
     return {"id": dm_id, "to_id": target_id, "text": text, "priority": True}
 
 
+@app.get("/ui/api/dm/{agent_id}")
+async def ui_get_dms(agent_id: str, session: str = Depends(require_human)):
+    """Read DM history between human and an agent."""
+    db = await get_db()
+    msgs = await db.execute_fetchall(
+        "SELECT * FROM dms WHERE (from_id = 'human' AND to_id = ?) OR (from_id = ? AND to_id = 'human') ORDER BY created_at LIMIT 200",
+        (agent_id, agent_id),
+    )
+    return [_dm_dict(m) for m in msgs]
+
+
+@app.get("/ui/api/rooms/activity")
+async def ui_rooms_activity(session: str = Depends(require_human)):
+    """Return last message timestamp per room for unread indicators."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT r.name, MAX(m.created_at) as last_activity "
+        "FROM rooms r LEFT JOIN messages m ON r.id = m.room_id "
+        "GROUP BY r.id"
+    )
+    return {dict(r)["name"]: dict(r)["last_activity"] for r in rows}
+
+
+@app.post("/ui/api/rooms/{room_name}/status")
+async def ui_set_room_status(room_name: str, request: Request, session: str = Depends(require_human)):
+    body = await request.json()
+    new_status = body.get("status")
+    if new_status not in VALID_ROOM_STATUSES:
+        raise HTTPException(400, f"status must be one of: {', '.join(VALID_ROOM_STATUSES)}")
+    db = await get_db()
+    rows = await db.execute_fetchall("SELECT id FROM rooms WHERE name = ?", (room_name,))
+    if not rows:
+        raise HTTPException(404, "Room not found")
+    room_id = dict(rows[0])["id"]
+    await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
+    await db.commit()
+    return {"room": room_name, "status": new_status}
+
+
 # ---------------------------------------------------------------------------
 # API tokens management (human-only)
 # ---------------------------------------------------------------------------
