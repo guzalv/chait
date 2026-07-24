@@ -670,6 +670,21 @@ body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f
 .modal textarea{resize:none}
 .modal .btns{display:flex;gap:.5rem;justify-content:flex-end}
 .token-display{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:.5rem;font-family:monospace;font-size:.8rem;color:#22c55e;word-break:break-all;margin:.5rem 0;cursor:pointer;user-select:all}
+.mobile-back{display:none;background:none;border:none;color:#38bdf8;font-size:1.1rem;cursor:pointer;padding:.25rem .5rem;margin-right:.25rem}
+.panel-toggle{display:none;background:none;border:1px solid #334155;color:#94a3b8;font-size:.75rem;cursor:pointer;padding:.25rem .5rem;border-radius:4px;margin-left:.5rem}
+@media(max-width:1024px){
+  #right-panel{display:none;position:fixed;top:0;right:0;bottom:0;width:280px;z-index:90;box-shadow:-2px 0 12px rgba(0,0,0,.5)}
+  #right-panel.open{display:flex}
+  .panel-toggle{display:inline-block}
+}
+@media(max-width:767px){
+  #sidebar{position:fixed;top:0;left:0;bottom:0;width:100%;z-index:80;display:flex}
+  #sidebar.hidden{display:none}
+  #main{display:none;width:100%}
+  #main.active{display:flex}
+  .mobile-back{display:inline-block}
+  .modal .modal-box{width:92vw;max-width:420px}
+}
 </style></head><body>
 <div id="sidebar">
   <h1>chait <button class="btn btn-sm" onclick="openNewRoom()">+ Room</button></h1>
@@ -679,8 +694,8 @@ body{font-family:'SF Mono','Fira Code',monospace;background:#0f172a;color:#e2e8f
   <div id="no-room">Select a room or create one</div>
   <div id="room-view" style="display:none;flex:1;flex-direction:column">
     <div id="room-header">
-      <span><span id="room-title"></span> <span id="room-status-badge" class="room-status"></span></span>
-      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button></span>
+      <span><button class="mobile-back" onclick="showSidebar()">&larr;</button><span id="room-title"></span> <span id="room-status-badge" class="room-status"></span></span>
+      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
     </div>
     <div id="messages"></div>
     <div id="input-area">
@@ -748,11 +763,16 @@ async function loadRooms(){
       <span>${r.name}</span><span class="room-status ${sc}">${r.status}</span></div>`
   }).join('');
 }
+function isMobile(){return window.innerWidth<768}
+function showSidebar(){document.getElementById('sidebar').classList.remove('hidden');document.getElementById('main').classList.remove('active')}
+function showMessages(){document.getElementById('sidebar').classList.add('hidden');document.getElementById('main').classList.add('active')}
+function togglePanel(){document.getElementById('right-panel').classList.toggle('open')}
 async function selectRoom(name){
   currentRoom=name;lastTs=null;
   document.getElementById('no-room').style.display='none';
   document.getElementById('room-view').style.display='flex';
   document.getElementById('room-title').textContent='#'+name;
+  if(isMobile())showMessages();
   loadRooms();await loadMessages();await loadRoomDetails();
   if(pollInterval)clearInterval(pollInterval);pollInterval=setInterval(pollMessages,3000);
 }
