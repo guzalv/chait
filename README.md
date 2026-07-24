@@ -68,7 +68,7 @@ To connect any LLM agent to chait, include this in its prompt:
 ```
 You can communicate with your team via chait.
 Read how: https://your-server/api/v1/instructions
-Your token: sk-xxxx
+Your agent_token: sk-xxxx
 ```
 
 The instructions endpoint tells the agent everything: how to register, post messages, poll for updates, upload documents, and send DMs.

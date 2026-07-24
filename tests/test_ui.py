@@ -149,13 +149,13 @@ def test_data(server_url):
             },
         },
     )
-    token = agent["token"]
+    token = agent["agent_token"]
 
     # 4. Post messages using agent token
     _api_post(server_url, f"/api/v1/rooms/{room_name}/messages", {"text": "Hello from TestBot"}, token=token)
     _api_post(server_url, f"/api/v1/rooms/{room_name}/messages", {"text": "Second message"}, token=token)
 
-    return {"room": room_name, "agent": agent, "token": token}
+    return {"room": room_name, "agent": agent, "agent_token": token}
 
 
 @pytest.fixture(scope="session")
@@ -472,7 +472,7 @@ class TestLiveUpdates:
                 break
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg")))
         unique = f"api-{int(time.time())}"
-        _api_post(server_url, f"/api/v1/rooms/{test_data['room']}/messages", {"text": unique}, token=test_data["token"])
+        _api_post(server_url, f"/api/v1/rooms/{test_data['room']}/messages", {"text": unique}, token=test_data["agent_token"])
         # Wait for poll interval (3s in JS)
         time.sleep(5)
         assert unique in driver.find_element(By.ID, "messages").text

@@ -199,7 +199,7 @@ for i in "${!ROLES[@]}"; do
     -H "Content-Type: application/json" \
     -d "{\"join_token\": \"$JOIN_TOKEN\", \"name\": \"$name\", \"role\": \"$role\", \"card\": $card}")
 
-  token=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])")
+  token=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['agent_token'])")
   agent_id=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
   TOKENS+=("$token")
   IDS+=("$agent_id")

@@ -103,7 +103,7 @@ async def init_db():
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'agent',
-            token TEXT NOT NULL UNIQUE,
+            agent_token TEXT NOT NULL UNIQUE,
             card TEXT DEFAULT '{}',
             room_id TEXT NOT NULL REFERENCES rooms(id),
             created_at TEXT NOT NULL
@@ -186,7 +186,7 @@ def _uid() -> str:
 
 async def _get_agent_by_token(token: str) -> Optional[dict]:
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT * FROM agents WHERE token = ?", (token,))
+    rows = await db.execute_fetchall("SELECT * FROM agents WHERE agent_token = ?", (token,))
     return dict(rows[0]) if rows else None
 
 
@@ -396,10 +396,10 @@ Join a room using your join token:
     {{"join_token": "<your-join-token>", "name": "Your Name", "role": "coder",
       "card": {{"description": "What you do", "skills": ["python", "testing"]}}}}
 
-    Response: {{"id": "...", "token": "sk-...", "room": "room-name",
+    Response: {{"id": "...", "agent_token": "sk-...", "room": "room-name",
                "context": {{"topic": "...", "documents": [...]}}}}
 
-Use the returned `token` as `Authorization: Bearer sk-...` for all subsequent requests.
+Use the returned `agent_token` as `Authorization: Bearer sk-...` for all subsequent requests.
 
 ## Endpoints
 
@@ -479,21 +479,21 @@ async def join_with_token(request: Request, body: JoinRequest):
     room = dict(rows[0])
     # Idempotent join: reuse existing agent if same name in same room
     existing = await db.execute_fetchall(
-        "SELECT id, token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"]))
+        "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"]))
     if existing:
         agent = dict(existing[0])
         if card:
             await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
             await db.commit()
         agent_id = agent["id"]
-        agent_token = agent["token"]
+        agent_token = agent["agent_token"]
         logger.info("Agent '%s' re-joined room '%s' (existing)", name, room["name"])
     else:
         agent_id = _uid()
         agent_token = f"sk-{secrets.token_hex(24)}"
         expires = (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
         await db.execute(
-            "INSERT INTO agents (id, name, role, token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO agents (id, name, role, agent_token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
         )
         await db.commit()
@@ -507,7 +507,7 @@ async def join_with_token(request: Request, body: JoinRequest):
         "id": agent_id,
         "name": name,
         "role": role,
-        "token": agent_token,
+        "agent_token": agent_token,
         "room": room["name"],
         "card": card,
         "context": {
