@@ -321,9 +321,7 @@ class TestDMs:
         ts = client.get(f"/api/v1/dm/{a2['id']}", headers=_auth(a1["agent_token"])).json()["data"][0]["created_at"]
         time.sleep(0.02)
         client.post(f"/api/v1/dm/{a2['id']}", json={"text": "new"}, headers=_auth(a1["agent_token"]))
-        resp = client.get(
-            f"/api/v1/dm/{a2['id']}", params={"since": ts}, headers=_auth(a1["agent_token"])
-        ).json()
+        resp = client.get(f"/api/v1/dm/{a2['id']}", params={"since": ts}, headers=_auth(a1["agent_token"])).json()
         assert resp["count"] == 1
         assert resp["data"][0]["text"] == "new"
 
@@ -362,7 +360,9 @@ class TestUnread:
         future = datetime.now(timezone.utc).isoformat()
         time.sleep(0.02)
         t0 = time.monotonic()
-        unread = client.get("/api/v1/me/unread", params={"wait": 1, "since": future}, headers=_auth(a1["agent_token"])).json()
+        unread = client.get(
+            "/api/v1/me/unread", params={"wait": 1, "since": future}, headers=_auth(a1["agent_token"])
+        ).json()
         elapsed = time.monotonic() - t0
         assert elapsed >= 0.9
         assert unread["room_messages"] == []

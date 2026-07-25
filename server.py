@@ -255,9 +255,7 @@ async def _require_room_member(db: aiosqlite.Connection, room_name: str, agent_i
     if not rows:
         raise ApiError(404, "NOT_FOUND", "Room not found")
     room_id = dict(rows[0])["id"]
-    member = await db.execute_fetchall(
-        "SELECT 1 FROM agents WHERE id = ? AND room_id = ?", (agent_id, room_id)
-    )
+    member = await db.execute_fetchall("SELECT 1 FROM agents WHERE id = ? AND room_id = ?", (agent_id, room_id))
     if not member:
         raise ApiError(403, "FORBIDDEN", "Not a member of this room")
     return room_id
@@ -479,7 +477,8 @@ async def join_with_token(request: Request, body: JoinRequest):
     room = dict(rows[0])
     # Idempotent join: reuse existing agent if same name in same room
     existing = await db.execute_fetchall(
-        "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"]))
+        "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"])
+    )
     if existing:
         agent = dict(existing[0])
         if card:
@@ -491,7 +490,9 @@ async def join_with_token(request: Request, body: JoinRequest):
     else:
         agent_id = _uid()
         agent_token = f"sk-{secrets.token_hex(24)}"
-        expires = (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
+        expires = (
+            (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
+        )
         await db.execute(
             "INSERT INTO agents (id, name, role, agent_token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
@@ -616,7 +617,9 @@ async def get_room(room_name: str, agent: dict = Depends(auth_agent)):
 async def set_room_status(room_name: str, body: StatusUpdateRequest, agent: dict = Depends(auth_agent)):
     new_status = body.status
     if new_status not in VALID_ROOM_STATUSES:
-        raise ApiError(400, "INVALID_FIELD", f"status must be one of: {', '.join(sorted(VALID_ROOM_STATUSES))}", field="status")
+        raise ApiError(
+            400, "INVALID_FIELD", f"status must be one of: {', '.join(sorted(VALID_ROOM_STATUSES))}", field="status"
+        )
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
     await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
@@ -642,9 +645,15 @@ async def post_message(room_name: str, body: MessageRequest, agent: dict = Depen
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
     return {
-        "id": msg_id, "room": room_name, "author_id": agent["id"],
-        "author_name": agent["name"], "author_role": agent["role"],
-        "text": body.text, "reply_to": body.reply_to, "priority": False, "created_at": now,
+        "id": msg_id,
+        "room": room_name,
+        "author_id": agent["id"],
+        "author_name": agent["name"],
+        "author_role": agent["role"],
+        "text": body.text,
+        "reply_to": body.reply_to,
+        "priority": False,
+        "created_at": now,
     }
 
 
@@ -691,8 +700,13 @@ async def send_dm(target_id: str, body: DMRequest, agent: dict = Depends(auth_ag
     await db.commit()
     _notify_agent(target_id)
     return {
-        "id": dm_id, "from_id": agent["id"], "from_name": agent["name"],
-        "to_id": target_id, "text": body.text, "priority": False, "created_at": now,
+        "id": dm_id,
+        "from_id": agent["id"],
+        "from_name": agent["name"],
+        "to_id": target_id,
+        "text": body.text,
+        "priority": False,
+        "created_at": now,
     }
 
 
@@ -881,7 +895,9 @@ async def login_submit(request: Request):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", max_age=86400 * 7)
         return resp
-    logger.warning("Login failed for user '%s' from %s", form.get("user", ""), request.client.host if request.client else "unknown")
+    logger.warning(
+        "Login failed for user '%s' from %s", form.get("user", ""), request.client.host if request.client else "unknown"
+    )
     return HTMLResponse(
         "<html><body style='background:#0f172a;color:#f87171;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh'>Invalid credentials. <a href='/login' style='color:#38bdf8;margin-left:8px'>Retry</a></body></html>",
         401,
@@ -1029,9 +1045,15 @@ async def ui_send_message(room_name: str, request: Request, session: str = Depen
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
     return {
-        "id": msg_id, "room": room_name, "author_id": "human",
-        "author_name": "Human", "author_role": "god",
-        "text": text, "reply_to": None, "priority": True, "created_at": now,
+        "id": msg_id,
+        "room": room_name,
+        "author_id": "human",
+        "author_name": "Human",
+        "author_role": "god",
+        "text": text,
+        "reply_to": None,
+        "priority": True,
+        "created_at": now,
     }
 
 
@@ -1075,8 +1097,13 @@ async def ui_send_dm(target_id: str, request: Request, session: str = Depends(re
     await db.commit()
     _notify_agent(target_id)
     return {
-        "id": dm_id, "from_id": "human", "from_name": "Human",
-        "to_id": target_id, "text": text, "priority": True, "created_at": now,
+        "id": dm_id,
+        "from_id": "human",
+        "from_name": "Human",
+        "to_id": target_id,
+        "text": text,
+        "priority": True,
+        "created_at": now,
     }
 
 
