@@ -71,7 +71,7 @@ def _notify_agent(agent_id: str):
 
 def _notify_room_members(db_rows, exclude: str = ""):
     for r in db_rows:
-        aid = dict(r)["agent_id"]
+        aid = dict(r)["id"]
         if aid != exclude:
             _notify_agent(aid)
 
@@ -103,9 +103,9 @@ async def init_db():
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'agent',
-            token TEXT NOT NULL UNIQUE,
+            agent_token TEXT NOT NULL UNIQUE,
             card TEXT DEFAULT '{}',
-            room_id TEXT,
+            room_id TEXT NOT NULL REFERENCES rooms(id),
             created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS rooms (
@@ -115,12 +115,6 @@ async def init_db():
             status TEXT NOT NULL DEFAULT 'active',
             join_token TEXT NOT NULL UNIQUE,
             created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS room_members (
-            room_id TEXT NOT NULL,
-            agent_id TEXT NOT NULL,
-            joined_at TEXT NOT NULL,
-            PRIMARY KEY (room_id, agent_id)
         );
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
@@ -163,12 +157,11 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_dms_to ON dms(to_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_dms_from ON dms(from_id, created_at);
-        CREATE INDEX IF NOT EXISTS idx_room_members_agent ON room_members(agent_id, room_id);
+        CREATE INDEX IF NOT EXISTS idx_agents_room ON agents(room_id);
     """)
     # Migrations for existing DBs
     for col, tbl, default in [
         ("card", "agents", "'{}'"),
-        ("room_id", "agents", "NULL"),
         ("status", "rooms", "'active'"),
         ("join_token", "rooms", "''"),
         ("expires_at", "agents", "NULL"),
@@ -193,7 +186,7 @@ def _uid() -> str:
 
 async def _get_agent_by_token(token: str) -> Optional[dict]:
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT * FROM agents WHERE token = ?", (token,))
+    rows = await db.execute_fetchall("SELECT * FROM agents WHERE agent_token = ?", (token,))
     return dict(rows[0]) if rows else None
 
 
@@ -262,9 +255,7 @@ async def _require_room_member(db: aiosqlite.Connection, room_name: str, agent_i
     if not rows:
         raise ApiError(404, "NOT_FOUND", "Room not found")
     room_id = dict(rows[0])["id"]
-    member = await db.execute_fetchall(
-        "SELECT 1 FROM room_members WHERE room_id = ? AND agent_id = ?", (room_id, agent_id)
-    )
+    member = await db.execute_fetchall("SELECT 1 FROM agents WHERE id = ? AND room_id = ?", (agent_id, room_id))
     if not member:
         raise ApiError(403, "FORBIDDEN", "Not a member of this room")
     return room_id
@@ -403,10 +394,10 @@ Join a room using your join token:
     {{"join_token": "<your-join-token>", "name": "Your Name", "role": "coder",
       "card": {{"description": "What you do", "skills": ["python", "testing"]}}}}
 
-    Response: {{"id": "...", "token": "sk-...", "room": "room-name",
+    Response: {{"id": "...", "agent_token": "sk-...", "room": "room-name",
                "context": {{"topic": "...", "documents": [...]}}}}
 
-Use the returned `token` as `Authorization: Bearer sk-...` for all subsequent requests.
+Use the returned `agent_token` as `Authorization: Bearer sk-...` for all subsequent requests.
 
 ## Endpoints
 
@@ -486,27 +477,25 @@ async def join_with_token(request: Request, body: JoinRequest):
     room = dict(rows[0])
     # Idempotent join: reuse existing agent if same name in same room
     existing = await db.execute_fetchall(
-        "SELECT a.id, a.token, a.role FROM agents a JOIN room_members rm ON a.id = rm.agent_id "
-        "WHERE a.name = ? AND rm.room_id = ?", (name, room["id"]))
+        "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"])
+    )
     if existing:
         agent = dict(existing[0])
         if card:
             await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
             await db.commit()
         agent_id = agent["id"]
-        agent_token = agent["token"]
+        agent_token = agent["agent_token"]
         logger.info("Agent '%s' re-joined room '%s' (existing)", name, room["name"])
     else:
         agent_id = _uid()
         agent_token = f"sk-{secrets.token_hex(24)}"
-        expires = (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
-        await db.execute(
-            "INSERT INTO agents (id, name, role, token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
+        expires = (
+            (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
         )
         await db.execute(
-            "INSERT OR IGNORE INTO room_members (room_id, agent_id, joined_at) VALUES (?, ?, ?)",
-            (room["id"], agent_id, _now()),
+            "INSERT INTO agents (id, name, role, agent_token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
         )
         await db.commit()
         logger.info("Agent '%s' (role=%s) joined room '%s'", name, role, room["name"])
@@ -519,7 +508,7 @@ async def join_with_token(request: Request, body: JoinRequest):
         "id": agent_id,
         "name": name,
         "role": role,
-        "token": agent_token,
+        "agent_token": agent_token,
         "room": room["name"],
         "card": card,
         "context": {
@@ -576,9 +565,8 @@ async def update_card(request: Request, agent: dict = Depends(auth_agent)):
 
 @app.delete("/api/v1/me")
 async def deregister(agent: dict = Depends(auth_agent)):
-    """Agent self-deregister: removes from all rooms and deletes identity."""
+    """Agent self-deregister: deletes identity."""
     db = await get_db()
-    await db.execute("DELETE FROM room_members WHERE agent_id = ?", (agent["id"],))
     await db.execute("DELETE FROM agents WHERE id = ?", (agent["id"],))
     await db.commit()
     logger.info("Agent '%s' deregistered", agent["name"])
@@ -595,7 +583,7 @@ VALID_ROOM_STATUSES = {"active", "waiting-for-input", "completed", "blocked"}
 async def list_rooms(agent: dict = Depends(auth_agent)):
     db = await get_db()
     rows = await db.execute_fetchall(
-        "SELECT r.id, r.name, r.topic, r.status, r.created_at FROM rooms r JOIN room_members rm ON r.id = rm.room_id WHERE rm.agent_id = ?",
+        "SELECT r.id, r.name, r.topic, r.status, r.created_at FROM rooms r WHERE r.id = (SELECT room_id FROM agents WHERE id = ?)",
         (agent["id"],),
     )
     data = [dict(r) for r in rows]
@@ -610,7 +598,7 @@ async def get_room(room_name: str, agent: dict = Depends(auth_agent)):
     room = dict(rows[0])
     room.pop("join_token", None)  # never expose join_token to agents
     members = await db.execute_fetchall(
-        "SELECT a.id, a.name, a.role, a.card FROM agents a JOIN room_members rm ON a.id = rm.agent_id WHERE rm.room_id = ?",
+        "SELECT id, name, role, card FROM agents WHERE room_id = ?",
         (room_id,),
     )
     room["members"] = [
@@ -629,7 +617,9 @@ async def get_room(room_name: str, agent: dict = Depends(auth_agent)):
 async def set_room_status(room_name: str, body: StatusUpdateRequest, agent: dict = Depends(auth_agent)):
     new_status = body.status
     if new_status not in VALID_ROOM_STATUSES:
-        raise ApiError(400, "INVALID_FIELD", f"status must be one of: {', '.join(sorted(VALID_ROOM_STATUSES))}", field="status")
+        raise ApiError(
+            400, "INVALID_FIELD", f"status must be one of: {', '.join(sorted(VALID_ROOM_STATUSES))}", field="status"
+        )
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
     await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
@@ -652,12 +642,18 @@ async def post_message(room_name: str, body: MessageRequest, agent: dict = Depen
         (msg_id, room_id, agent["id"], agent["name"], agent["role"], body.text, body.reply_to, 0, now),
     )
     await db.commit()
-    members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
+    members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
     return {
-        "id": msg_id, "room": room_name, "author_id": agent["id"],
-        "author_name": agent["name"], "author_role": agent["role"],
-        "text": body.text, "reply_to": body.reply_to, "priority": False, "created_at": now,
+        "id": msg_id,
+        "room": room_name,
+        "author_id": agent["id"],
+        "author_name": agent["name"],
+        "author_role": agent["role"],
+        "text": body.text,
+        "reply_to": body.reply_to,
+        "priority": False,
+        "created_at": now,
     }
 
 
@@ -704,8 +700,13 @@ async def send_dm(target_id: str, body: DMRequest, agent: dict = Depends(auth_ag
     await db.commit()
     _notify_agent(target_id)
     return {
-        "id": dm_id, "from_id": agent["id"], "from_name": agent["name"],
-        "to_id": target_id, "text": body.text, "priority": False, "created_at": now,
+        "id": dm_id,
+        "from_id": agent["id"],
+        "from_name": agent["name"],
+        "to_id": target_id,
+        "text": body.text,
+        "priority": False,
+        "created_at": now,
     }
 
 
@@ -747,7 +748,7 @@ async def unread(
 
     async def _fetch():
         room_msgs = await db.execute_fetchall(
-            "SELECT m.*, r.name as room_name FROM messages m JOIN rooms r ON m.room_id = r.id JOIN room_members rm ON m.room_id = rm.room_id WHERE rm.agent_id = ? AND m.created_at > ? AND m.author_id != ? ORDER BY m.created_at",
+            "SELECT m.*, r.name as room_name FROM messages m JOIN rooms r ON m.room_id = r.id WHERE m.room_id = (SELECT room_id FROM agents WHERE id = ?) AND m.created_at > ? AND m.author_id != ? ORDER BY m.created_at",
             (agent["id"], since, agent["id"]),
         )
         dm_msgs = await db.execute_fetchall(
@@ -755,7 +756,7 @@ async def unread(
             (agent["id"], since),
         )
         new_docs = await db.execute_fetchall(
-            "SELECT d.*, r.name as room_name FROM documents d JOIN rooms r ON d.room_id = r.id JOIN room_members rm ON d.room_id = rm.room_id WHERE rm.agent_id = ? AND d.created_at > ? AND d.uploaded_by != ? ORDER BY d.created_at",
+            "SELECT d.*, r.name as room_name FROM documents d JOIN rooms r ON d.room_id = r.id WHERE d.room_id = (SELECT room_id FROM agents WHERE id = ?) AND d.created_at > ? AND d.uploaded_by != ? ORDER BY d.created_at",
             (agent["id"], since, agent["id"]),
         )
         return room_msgs, dm_msgs, new_docs
@@ -833,7 +834,7 @@ async def upload_document(room_name: str, file: UploadFile = File(...), agent: d
         (doc_id, room_id, safe_name, file.content_type, agent["id"], len(content), _now()),
     )
     await db.commit()
-    members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
+    members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
     return {"id": doc_id, "filename": safe_name, "size": len(content)}
 
@@ -894,7 +895,9 @@ async def login_submit(request: Request):
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", max_age=86400 * 7)
         return resp
-    logger.warning("Login failed for user '%s' from %s", form.get("user", ""), request.client.host if request.client else "unknown")
+    logger.warning(
+        "Login failed for user '%s' from %s", form.get("user", ""), request.client.host if request.client else "unknown"
+    )
     return HTMLResponse(
         "<html><body style='background:#0f172a;color:#f87171;font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh'>Invalid credentials. <a href='/login' style='color:#38bdf8;margin-left:8px'>Retry</a></body></html>",
         401,
@@ -999,7 +1002,7 @@ async def ui_room_details(room_name: str, session: str = Depends(require_human))
     room = dict(rows[0])
     room.pop("join_token", None)
     members = await db.execute_fetchall(
-        "SELECT a.id, a.name, a.role, a.card FROM agents a JOIN room_members rm ON a.id = rm.agent_id WHERE rm.room_id = ?",
+        "SELECT id, name, role, card FROM agents WHERE room_id = ?",
         (room["id"],),
     )
     room["members"] = [
@@ -1039,12 +1042,18 @@ async def ui_send_message(room_name: str, request: Request, session: str = Depen
         (msg_id, room_id, "human", "Human", "god", text, None, 1, now),
     )
     await db.commit()
-    members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
+    members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
     return {
-        "id": msg_id, "room": room_name, "author_id": "human",
-        "author_name": "Human", "author_role": "god",
-        "text": text, "reply_to": None, "priority": True, "created_at": now,
+        "id": msg_id,
+        "room": room_name,
+        "author_id": "human",
+        "author_name": "Human",
+        "author_role": "god",
+        "text": text,
+        "reply_to": None,
+        "priority": True,
+        "created_at": now,
     }
 
 
@@ -1065,7 +1074,7 @@ async def ui_upload_document(room_name: str, file: UploadFile = File(...), sessi
         (doc_id, room_id, safe_name, file.content_type, "human", len(content), _now()),
     )
     await db.commit()
-    members = await db.execute_fetchall("SELECT agent_id FROM room_members WHERE room_id = ?", (room_id,))
+    members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
     return {"id": doc_id, "filename": safe_name, "size": len(content)}
 
@@ -1088,8 +1097,13 @@ async def ui_send_dm(target_id: str, request: Request, session: str = Depends(re
     await db.commit()
     _notify_agent(target_id)
     return {
-        "id": dm_id, "from_id": "human", "from_name": "Human",
-        "to_id": target_id, "text": text, "priority": True, "created_at": now,
+        "id": dm_id,
+        "from_id": "human",
+        "from_name": "Human",
+        "to_id": target_id,
+        "text": text,
+        "priority": True,
+        "created_at": now,
     }
 
 
@@ -1136,7 +1150,6 @@ async def ui_set_room_status(room_name: str, request: Request, session: str = De
 async def ui_remove_agent(agent_id: str, session: str = Depends(require_human)):
     """Remove an agent from the system."""
     db = await get_db()
-    await db.execute("DELETE FROM room_members WHERE agent_id = ?", (agent_id,))
     await db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
     await db.commit()
     logger.info("Agent '%s' removed by human", agent_id)

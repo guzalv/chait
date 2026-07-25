@@ -149,13 +149,13 @@ def test_data(server_url):
             },
         },
     )
-    token = agent["token"]
+    token = agent["agent_token"]
 
     # 4. Post messages using agent token
     _api_post(server_url, f"/api/v1/rooms/{room_name}/messages", {"text": "Hello from TestBot"}, token=token)
     _api_post(server_url, f"/api/v1/rooms/{room_name}/messages", {"text": "Second message"}, token=token)
 
-    return {"room": room_name, "agent": agent, "token": token}
+    return {"room": room_name, "agent": agent, "agent_token": token}
 
 
 @pytest.fixture(scope="session")
@@ -335,9 +335,7 @@ class TestAgentCards:
 
     def test_agent_card_has_dm_button(self, driver, server_url, logged_in, test_data):
         self._select_room(driver, server_url, test_data)
-        WebDriverWait(driver, 5).until(
-            lambda d: len(d.find_elements(By.CSS_SELECTOR, ".agent-card .dm-btn")) >= 1
-        )
+        WebDriverWait(driver, 5).until(lambda d: len(d.find_elements(By.CSS_SELECTOR, ".agent-card .dm-btn")) >= 1)
 
 
 # ── Human messaging ──────────────────────────────────────────────────────
@@ -414,8 +412,8 @@ class TestDMModal:
             if test_data["room"] in item.text:
                 item.click()
                 break
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".dm-btn")))
-        driver.find_element(By.CSS_SELECTOR, ".dm-btn").click()
+        btn = WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.CSS_SELECTOR, ".dm-btn")))
+        btn.click()
         WebDriverWait(driver, 10).until(
             lambda d: d.find_element(By.ID, "dm-modal").value_of_css_property("display") != "none"
         )
@@ -472,7 +470,9 @@ class TestLiveUpdates:
                 break
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#messages .msg")))
         unique = f"api-{int(time.time())}"
-        _api_post(server_url, f"/api/v1/rooms/{test_data['room']}/messages", {"text": unique}, token=test_data["token"])
+        _api_post(
+            server_url, f"/api/v1/rooms/{test_data['room']}/messages", {"text": unique}, token=test_data["agent_token"]
+        )
         # Wait for poll interval (3s in JS)
         time.sleep(5)
         assert unique in driver.find_element(By.ID, "messages").text
@@ -496,10 +496,13 @@ def _make_chrome(mobile=False):
     ]:
         opts.add_argument(a)
     if mobile:
-        opts.add_experimental_option("mobileEmulation", {
-            "deviceMetrics": {"width": 390, "height": 844, "pixelRatio": 3.0},
-            "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-        })
+        opts.add_experimental_option(
+            "mobileEmulation",
+            {
+                "deviceMetrics": {"width": 390, "height": 844, "pixelRatio": 3.0},
+                "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+            },
+        )
     else:
         opts.add_argument("--window-size=1920,1080")
     snap_driver = "/snap/bin/chromium.chromedriver"
@@ -615,9 +618,7 @@ class TestRoomCreation:
         room_name = f"ui-create-{int(time.time())}"
         name_input.send_keys(room_name)
         driver.find_element(By.ID, "create-room-btn").click()
-        WebDriverWait(driver, 5).until(
-            lambda d: d.find_element(By.ID, "new-room-token").text.startswith("chait-")
-        )
+        WebDriverWait(driver, 5).until(lambda d: d.find_element(By.ID, "new-room-token").text.startswith("chait-"))
         assert driver.find_element(By.ID, "new-room-token").text.startswith("chait-")
 
     def test_created_room_in_sidebar(self, driver, server_url, logged_in):
@@ -662,6 +663,7 @@ class TestRoomStatusControl:
 
     def test_change_status(self, driver, server_url, logged_in, test_data):
         from selenium.webdriver.support.ui import Select
+
         self._select_room(driver, server_url, test_data)
         Select(driver.find_element(By.ID, "room-status-select")).select_by_value("waiting-for-input")
         time.sleep(2)
@@ -706,9 +708,15 @@ class TestXSSPrevention:
         """)
         time.sleep(1)
         join_token = driver.execute_script("return window._xss_token")
-        _api_post(server_url, "/api/v1/join", {
-            "join_token": join_token, "name": xss_name, "role": "agent",
-        })
+        _api_post(
+            server_url,
+            "/api/v1/join",
+            {
+                "join_token": join_token,
+                "name": xss_name,
+                "role": "agent",
+            },
+        )
         driver.get(server_url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):

@@ -89,23 +89,23 @@ def test_multi_agent_room_conversation(client):
     c = _join(client, room["join_token"], "Carol", "tester", {"skills": ["pytest"]})
 
     # A posts
-    _post(client, "project-x", "Here are the mockups", a["token"])
+    _post(client, "project-x", "Here are the mockups", a["agent_token"])
 
     # B and C poll unread — both see A's message
     for ag in [b, c]:
-        data = _unread(client, ag["token"])
+        data = _unread(client, ag["agent_token"])
         assert any(m["text"] == "Here are the mockups" and m["room"] == "project-x" for m in data["room_messages"])
 
     # B replies
-    _post(client, "project-x", "Looks good, implementing", b["token"])
+    _post(client, "project-x", "Looks good, implementing", b["agent_token"])
 
     # A and C see B's reply
     for ag in [a, c]:
-        data = _unread(client, ag["token"])
+        data = _unread(client, ag["agent_token"])
         assert any(m["text"] == "Looks good, implementing" for m in data["room_messages"])
 
     # All messages in correct order with correct authors
-    msgs = client.get("/api/v1/rooms/project-x/messages", headers=_auth(a["token"])).json()["data"]
+    msgs = client.get("/api/v1/rooms/project-x/messages", headers=_auth(a["agent_token"])).json()["data"]
     assert len(msgs) == 2
     assert msgs[0]["author_name"] == "Alice"
     assert msgs[1]["author_name"] == "Bob"
@@ -126,7 +126,7 @@ def test_long_poll_notification_delivery(client):
     def poll():
         try:
             t0 = time.monotonic()
-            r = client.get("/api/v1/me/unread", params={"wait": 10}, headers=_auth(b["token"]))
+            r = client.get("/api/v1/me/unread", params={"wait": 10}, headers=_auth(b["agent_token"]))
             result["elapsed"] = time.monotonic() - t0
             result["data"] = r.json()
         except Exception as e:
@@ -136,7 +136,7 @@ def test_long_poll_notification_delivery(client):
     t.start()
     time.sleep(1)  # let poll enter wait state
 
-    _post(client, "poll-room", "wake up!", a["token"])
+    _post(client, "poll-room", "wake up!", a["agent_token"])
     t.join(timeout=8)
 
     assert not t.is_alive(), "Long-poll thread still running"
@@ -155,7 +155,7 @@ def test_human_god_mode_priority(client):
     b = _join(client, room["join_token"], "Bob", "dev")
 
     # Agent A posts normal message
-    _post(client, "priority-room", "agent message", a["token"])
+    _post(client, "priority-room", "agent message", a["agent_token"])
 
     # Human posts priority message (session cookie already set by _login)
     r = client.post("/ui/api/rooms/priority-room/messages", json={"text": "urgent from human"})
@@ -163,7 +163,7 @@ def test_human_god_mode_priority(client):
     assert r.json()["priority"] is True
 
     # B polls unread — sees both
-    data = _unread(client, b["token"])
+    data = _unread(client, b["agent_token"])
     room_msgs = data["room_messages"]
 
     agent_msg = next(m for m in room_msgs if m["text"] == "agent message")
@@ -186,19 +186,19 @@ def test_dm_routing(client):
     c = _join(client, room["join_token"], "Carol")
 
     # A sends DM to B
-    r = client.post(f"/api/v1/dm/{b['id']}", json={"text": "private to Bob"}, headers=_auth(a["token"]))
+    r = client.post(f"/api/v1/dm/{b['id']}", json={"text": "private to Bob"}, headers=_auth(a["agent_token"]))
     assert r.status_code == 200
 
     # B sees the DM
-    b_data = _unread(client, b["token"])
+    b_data = _unread(client, b["agent_token"])
     assert any(d["text"] == "private to Bob" and d["from_id"] == a["id"] for d in b_data["dms"])
 
     # C does NOT see the DM
-    c_data = _unread(client, c["token"])
+    c_data = _unread(client, c["agent_token"])
     assert len(c_data["dms"]) == 0
 
     # B reads DM history with A
-    history = client.get(f"/api/v1/dm/{a['id']}", headers=_auth(b["token"])).json()["data"]
+    history = client.get(f"/api/v1/dm/{a['id']}", headers=_auth(b["agent_token"])).json()["data"]
     assert len(history) == 1
     assert history[0]["text"] == "private to Bob"
     assert history[0]["from_id"] == a["id"]
@@ -213,7 +213,7 @@ def test_room_lifecycle_status_transitions(client):
     room = _create_room(client, "lifecycle-room")
     assert room["status"] == "active"
     agent = _join(client, room["join_token"])
-    h = _auth(agent["token"])
+    h = _auth(agent["agent_token"])
 
     transitions = ["waiting-for-input", "active", "completed"]
     for status in transitions:
@@ -243,7 +243,7 @@ def test_agent_card_visibility(client):
     _login(client)
     room = _create_room(client, "card-room")
     agent = _join(client, room["join_token"], "CardAgent", "engineer", card)
-    h = _auth(agent["token"])
+    h = _auth(agent["agent_token"])
 
     # Card present in room member info
     room_data = client.get("/api/v1/rooms/card-room", headers=h).json()
@@ -277,7 +277,7 @@ def test_document_sharing(client):
     r = client.post(
         "/api/v1/rooms/docs-room/documents",
         files={"file": ("design.md", content, "text/markdown")},
-        headers=_auth(a["token"]),
+        headers=_auth(a["agent_token"]),
     )
     assert r.status_code == 200
     doc = r.json()
@@ -285,7 +285,7 @@ def test_document_sharing(client):
     assert doc["size"] == len(content)
 
     # B lists documents
-    docs = client.get("/api/v1/rooms/docs-room/documents", headers=_auth(b["token"])).json()["data"]
+    docs = client.get("/api/v1/rooms/docs-room/documents", headers=_auth(b["agent_token"])).json()["data"]
     assert len(docs) == 1
     assert docs[0]["filename"] == "design.md"
     assert docs[0]["uploaded_by"] == a["id"]
@@ -308,7 +308,7 @@ def test_concurrent_message_ordering(client):
 
     def post_msg(agent, idx):
         try:
-            _post(client, "concurrent", f"msg-{idx}", agent["token"])
+            _post(client, "concurrent", f"msg-{idx}", agent["agent_token"])
         except Exception as e:
             errors.append(e)
 
@@ -320,7 +320,7 @@ def test_concurrent_message_ordering(client):
 
     assert not errors, f"Thread errors: {errors}"
 
-    msgs = client.get("/api/v1/rooms/concurrent/messages", headers=_auth(agents[0]["token"])).json()["data"]
+    msgs = client.get("/api/v1/rooms/concurrent/messages", headers=_auth(agents[0]["agent_token"])).json()["data"]
     assert len(msgs) == 5
 
     # Monotonically non-decreasing timestamps
@@ -341,7 +341,7 @@ def test_human_dm_to_agent(client):
     assert r.json()["priority"] is True
 
     # Agent polls unread
-    data = _unread(client, agent["token"])
+    data = _unread(client, agent["agent_token"])
     assert len(data["dms"]) == 1
     dm = data["dms"][0]
     assert dm["text"] == "please fix the bug"
@@ -379,24 +379,24 @@ def test_full_workflow_simulation(client):
     )
 
     # PM posts requirements
-    _post(client, "sprint-task", "Build widget CRUD API with validation and tests.", pm["token"])
+    _post(client, "sprint-task", "Build widget CRUD API with validation and tests.", pm["agent_token"])
 
     # Lead polls, sees PM's message, responds
-    lead_data = _unread(client, lead["token"])
+    lead_data = _unread(client, lead["agent_token"])
     assert any(m["author_name"] == "PM" for m in lead_data["room_messages"])
-    _post(client, "sprint-task", "REST design with OpenAPI spec. Standard CRUD.", lead["token"])
+    _post(client, "sprint-task", "REST design with OpenAPI spec. Standard CRUD.", lead["agent_token"])
 
     # Dev polls, sees both, responds
-    dev_data = _unread(client, dev["token"])
+    dev_data = _unread(client, dev["agent_token"])
     assert len(dev_data["room_messages"]) >= 2
-    _post(client, "sprint-task", "Starting with data models, then handlers.", dev["token"])
+    _post(client, "sprint-task", "Starting with data models, then handlers.", dev["agent_token"])
 
     # Lead uploads design doc
     doc_content = b"# Widget API\n- GET /widgets\n- POST /widgets\n- PUT /widgets/:id"
     r = client.post(
         "/api/v1/rooms/sprint-task/documents",
         files={"file": ("api-design.md", doc_content, "text/markdown")},
-        headers=_auth(lead["token"]),
+        headers=_auth(lead["agent_token"]),
     )
     assert r.status_code == 200
 
@@ -404,38 +404,38 @@ def test_full_workflow_simulation(client):
     r = client.post(
         "/api/v1/rooms/sprint-task/status",
         json={"status": "waiting-for-input"},
-        headers=_auth(pm["token"]),
+        headers=_auth(pm["agent_token"]),
     )
     assert r.status_code == 200
 
     r = client.post(
         "/api/v1/rooms/sprint-task/status",
         json={"status": "active"},
-        headers=_auth(dev["token"]),
+        headers=_auth(dev["agent_token"]),
     )
     assert r.status_code == 200
 
     # Dev completes
-    _post(client, "sprint-task", "Done. All tests passing.", dev["token"])
+    _post(client, "sprint-task", "Done. All tests passing.", dev["agent_token"])
     r = client.post(
         "/api/v1/rooms/sprint-task/status",
         json={"status": "completed"},
-        headers=_auth(dev["token"]),
+        headers=_auth(dev["agent_token"]),
     )
     assert r.status_code == 200
 
     # --- Final assertions ---
-    msgs = client.get("/api/v1/rooms/sprint-task/messages", headers=_auth(pm["token"])).json()["data"]
+    msgs = client.get("/api/v1/rooms/sprint-task/messages", headers=_auth(pm["agent_token"])).json()["data"]
     assert len(msgs) == 4
     assert [m["author_name"] for m in msgs] == ["PM", "Lead", "Dev", "Dev"]
     for i in range(1, len(msgs)):
         assert msgs[i]["created_at"] >= msgs[i - 1]["created_at"]
 
-    docs = client.get("/api/v1/rooms/sprint-task/documents", headers=_auth(pm["token"])).json()["data"]
+    docs = client.get("/api/v1/rooms/sprint-task/documents", headers=_auth(pm["agent_token"])).json()["data"]
     assert len(docs) == 1
     assert docs[0]["filename"] == "api-design.md"
 
-    room_data = client.get("/api/v1/rooms/sprint-task", headers=_auth(pm["token"])).json()
+    room_data = client.get("/api/v1/rooms/sprint-task", headers=_auth(pm["agent_token"])).json()
     assert room_data["status"] == "completed"
     assert {m["name"] for m in room_data["members"]} == {"PM", "Lead", "Dev"}
 
@@ -458,7 +458,7 @@ def test_human_document_upload_visible_to_agents(client):
     assert doc["filename"] == "context.txt"
 
     # Agent sees it in listing
-    docs = client.get("/api/v1/rooms/human-docs/documents", headers=_auth(agent["token"])).json()["data"]
+    docs = client.get("/api/v1/rooms/human-docs/documents", headers=_auth(agent["agent_token"])).json()["data"]
     assert len(docs) == 1
     assert docs[0]["filename"] == "context.txt"
     assert docs[0]["uploaded_by"] == "human"
@@ -487,14 +487,14 @@ def test_document_upload_notifies_via_unread(client):
     r = client.post(
         "/api/v1/rooms/doc-notify/documents",
         files={"file": ("report.pdf", b"pdf content", "application/pdf")},
-        headers=_auth(a["token"]),
+        headers=_auth(a["agent_token"]),
     )
     assert r.status_code == 200
 
     # B polls unread — should see the document
     unread = client.get(
         "/api/v1/me/unread",
-        headers=_auth(b["token"]),
+        headers=_auth(b["agent_token"]),
         params={"since": before},
     ).json()
     assert len(unread["documents"]) == 1
@@ -504,7 +504,7 @@ def test_document_upload_notifies_via_unread(client):
     # A should NOT see own upload in unread
     unread_a = client.get(
         "/api/v1/me/unread",
-        headers=_auth(a["token"]),
+        headers=_auth(a["agent_token"]),
         params={"since": before},
     ).json()
     assert len(unread_a["documents"]) == 0
@@ -523,7 +523,7 @@ def test_document_upload_wakes_long_poll(client):
         start = time.time()
         r = client.get(
             "/api/v1/me/unread",
-            headers=_auth(b["token"]),
+            headers=_auth(b["agent_token"]),
             params={"wait": "10"},
         )
         result["elapsed"] = time.time() - start
@@ -537,7 +537,7 @@ def test_document_upload_wakes_long_poll(client):
     client.post(
         "/api/v1/rooms/doc-wake/documents",
         files={"file": ("data.csv", b"a,b,c", "text/csv")},
-        headers=_auth(a["token"]),
+        headers=_auth(a["agent_token"]),
     )
 
     t.join(timeout=10)
