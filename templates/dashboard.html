@@ -269,23 +269,31 @@ function esc(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').repla
 function jsattr(s){return esc(JSON.stringify(s))}
 
 // --- Room details (plan 26: status control) ---
+// ponytail: skip the innerHTML write when content is unchanged. Overlapping
+// calls (e.g. session-restore racing a click on the same room, or a poll
+// mid-render) fetch identical data — writing it again would needlessly
+// destroy and recreate DOM nodes, invalidating any element handles a caller
+// (e.g. Selenium) is holding.
+let lastAgentsHtml=null,lastDocsHtml=null;
 async function loadRoomDetails(){
   const room=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/details`);if(!room)return;
   document.getElementById('room-topic').textContent=room.topic||'';
   const sel=document.getElementById('room-status-select');
   const statuses=['active','waiting-for-input','completed','blocked'];
   sel.innerHTML=statuses.map(s=>`<option value="${s}" ${s===room.status?'selected':''}>${s}</option>`).join('');
-  document.getElementById('agents-list').innerHTML=(room.members||[]).map(m=>{
+  const agentsHtml=(room.members||[]).map(m=>{
     const card=m.card||{};const skills=(card.skills||[]).join(', ');
     return `<div class="agent-card"><div class="agent-name">${esc(m.name)}</div><div class="agent-role">${esc(m.role)}</div>
       ${card.description?`<div class="agent-skills">${esc(card.description)}</div>`:''}
       ${skills?`<div class="agent-skills">Skills: ${esc(skills)}</div>`:''}
       <button class="btn btn-sm dm-btn" onclick="openDM(${jsattr(m.id)},${jsattr(m.name)})">DM</button></div>`;
   }).join('');
+  if(agentsHtml!==lastAgentsHtml){lastAgentsHtml=agentsHtml;document.getElementById('agents-list').innerHTML=agentsHtml}
   const docs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/documents`);
-  document.getElementById('docs-list').innerHTML=(docs||[]).map(d=>
+  const docsHtml=(docs||[]).map(d=>
     `<div class="doc-item"><a href="/api/v1/documents/${encodeURIComponent(d.id)}/download" target="_blank">${esc(d.filename)}</a> <span style="color:#64748b;font-size:.65rem">${(d.size/1024).toFixed(1)}KB</span></div>`
   ).join('');
+  if(docsHtml!==lastDocsHtml){lastDocsHtml=docsHtml;document.getElementById('docs-list').innerHTML=docsHtml}
 }
 async function changeRoomStatus(status){
   await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});
