@@ -1119,6 +1119,28 @@ async def ui_get_dms(agent_id: str, session: str = Depends(require_human)):
     return [_dm_dict(m) for m in msgs]
 
 
+@app.get("/ui/api/rooms/{room_name}/dms")
+async def ui_room_dms(room_name: str, since: Optional[str] = None, session: str = Depends(require_human)):
+    """Read all agent-to-agent DMs between members of this room (god-mode visibility)."""
+    db = await get_db()
+    room_id = await _get_room_id(db, room_name)
+    member_ids = "SELECT id FROM agents WHERE room_id = ?"
+    if since:
+        msgs = await db.execute_fetchall(
+            f"SELECT * FROM dms WHERE from_id IN ({member_ids}) AND to_id IN ({member_ids}) AND created_at > ? "
+            "ORDER BY created_at LIMIT 200",
+            (room_id, room_id, since),
+        )
+    else:
+        msgs = await db.execute_fetchall(
+            f"SELECT * FROM dms WHERE from_id IN ({member_ids}) AND to_id IN ({member_ids}) "
+            "ORDER BY created_at DESC LIMIT 200",
+            (room_id, room_id),
+        )
+        msgs = list(reversed(msgs))
+    return [_dm_dict(m) for m in msgs]
+
+
 @app.get("/ui/api/rooms/activity")
 async def ui_rooms_activity(session: str = Depends(require_human)):
     """Return last message timestamp per room for unread indicators."""

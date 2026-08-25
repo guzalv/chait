@@ -772,6 +772,97 @@ class TestDMConversation:
         driver.find_element(By.XPATH, "//div[@id='dm-modal']//button[contains(text(),'Close')]").click()
 
 
+# ── Room DMs (god-mode visibility of agent-to-agent DMs) ─────────────────
+
+
+@pytest.fixture(scope="session")
+def room_dms_data(server_url):
+    """Create a room with two agents and an agent-to-agent DM for Room DMs tests."""
+    room_name = f"room-dms-{int(time.time())}"
+    opener = _login_session(server_url)
+    room = _ui_api_post(opener, server_url, "/ui/api/rooms", {"name": room_name, "topic": "DM visibility test"})
+    alice = _api_post(
+        server_url,
+        "/api/v1/join",
+        {"join_token": room["join_token"], "name": "Alice", "role": "dev"},
+    )
+    bob = _api_post(
+        server_url,
+        "/api/v1/join",
+        {"join_token": room["join_token"], "name": "Bob", "role": "dev"},
+    )
+    # Alice DMs Bob (agent-to-agent, invisible to humans before this feature)
+    _api_post(
+        server_url,
+        f"/api/v1/dm/{bob['id']}",
+        {"text": "secret side-channel msg"},
+        token=alice["agent_token"],
+    )
+    return {"room": room_name, "alice": alice, "bob": bob}
+
+
+class TestRoomDMs:
+    def _select_room(self, driver, server_url, room_dms_data):
+        driver.get(server_url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
+        for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
+            if room_dms_data["room"] in item.text:
+                item.click()
+                break
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "room-title")))
+
+    def test_room_dms_button_exists(self, driver, server_url, logged_in, room_dms_data):
+        self._select_room(driver, server_url, room_dms_data)
+        btns = [b for b in driver.find_elements(By.TAG_NAME, "button") if b.text.strip() == "Room DMs"]
+        assert len(btns) == 1
+
+    def test_room_dms_modal_opens_with_room_name(self, driver, server_url, logged_in, room_dms_data):
+        self._select_room(driver, server_url, room_dms_data)
+        driver.find_element(By.XPATH, "//button[contains(text(),'Room DMs')]").click()
+        WebDriverWait(driver, 5).until(
+            lambda d: d.find_element(By.ID, "room-dms-modal").value_of_css_property("display") != "none"
+        )
+        title = driver.find_element(By.ID, "room-dms-room-name").text
+        assert room_dms_data["room"] in title
+        # Close it
+        driver.find_element(By.XPATH, "//div[@id='room-dms-modal']//button[contains(text(),'Close')]").click()
+
+    def test_room_dms_shows_agent_to_agent_dm(self, driver, server_url, logged_in, room_dms_data):
+        self._select_room(driver, server_url, room_dms_data)
+        driver.find_element(By.XPATH, "//button[contains(text(),'Room DMs')]").click()
+        WebDriverWait(driver, 5).until(
+            lambda d: d.find_element(By.ID, "room-dms-modal").value_of_css_property("display") != "none"
+        )
+        # Wait for content to load (polls every 3s, but first load is immediate)
+        WebDriverWait(driver, 5).until(
+            lambda d: "secret side-channel msg" in d.find_element(By.ID, "room-dms-messages").text
+        )
+        content = driver.find_element(By.ID, "room-dms-messages").text
+        assert "Alice" in content
+        assert "Bob" in content
+        driver.find_element(By.XPATH, "//div[@id='room-dms-modal']//button[contains(text(),'Close')]").click()
+
+    def test_room_dms_modal_close_button(self, driver, server_url, logged_in, room_dms_data):
+        self._select_room(driver, server_url, room_dms_data)
+        driver.find_element(By.XPATH, "//button[contains(text(),'Room DMs')]").click()
+        WebDriverWait(driver, 5).until(
+            lambda d: d.find_element(By.ID, "room-dms-modal").value_of_css_property("display") != "none"
+        )
+        driver.find_element(By.XPATH, "//div[@id='room-dms-modal']//button[contains(text(),'Close')]").click()
+        time.sleep(0.3)
+        assert driver.find_element(By.ID, "room-dms-modal").value_of_css_property("display") == "none"
+
+    def test_room_dms_escape_dismisses_modal(self, driver, server_url, logged_in, room_dms_data):
+        self._select_room(driver, server_url, room_dms_data)
+        driver.find_element(By.XPATH, "//button[contains(text(),'Room DMs')]").click()
+        WebDriverWait(driver, 5).until(
+            lambda d: d.find_element(By.ID, "room-dms-modal").value_of_css_property("display") != "none"
+        )
+        driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+        time.sleep(0.3)
+        assert driver.find_element(By.ID, "room-dms-modal").value_of_css_property("display") == "none"
+
+
 # ── Room persistence ─────────────────────────────────────────────────────
 
 
