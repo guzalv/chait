@@ -24,7 +24,13 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -74,6 +80,18 @@ def _notify_room_members(db_rows, exclude: str = ""):
         aid = dict(r)["id"]
         if aid != exclude:
             _notify_agent(aid)
+
+
+# Dashboard live updates: one queue per connected browser tab (SSE). Payload
+# is just a label for debugging — on any event every tab simply re-runs its
+# existing fetch functions, which are already cheap/idempotent (cursor-based
+# message polling, content-diffed detail rendering).
+_ui_subscribers: set[asyncio.Queue] = set()
+
+
+def _broadcast_ui(kind: str):
+    for q in _ui_subscribers:
+        q.put_nowait(kind)
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +518,7 @@ async def join_with_token(request: Request, body: JoinRequest):
         )
         await db.commit()
         logger.info("Agent '%s' (role=%s) joined room '%s'", name, role, room["name"])
+    _broadcast_ui("agents")
     # Include room context so agents know what they're joining
     docs = await db.execute_fetchall(
         "SELECT id, filename, size, created_at FROM documents WHERE room_id = ? ORDER BY created_at",
@@ -544,6 +563,7 @@ async def api_create_room(body: RoomCreateRequest, _token: str = Depends(auth_ma
     )
     await db.commit()
     logger.info("Room '%s' created (id=%s)", name, room_id)
+    _broadcast_ui("rooms")
     return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
 
 
@@ -571,6 +591,7 @@ async def deregister(agent: dict = Depends(auth_agent)):
     await db.execute("DELETE FROM agents WHERE id = ?", (agent["id"],))
     await db.commit()
     logger.info("Agent '%s' deregistered", agent["name"])
+    _broadcast_ui("agents")
     return {"status": "deregistered"}
 
 
@@ -625,6 +646,7 @@ async def set_room_status(room_name: str, body: StatusUpdateRequest, agent: dict
     room_id = await _require_room_member(db, room_name, agent["id"])
     await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
     await db.commit()
+    _broadcast_ui("room_status")
     return {"room": room_name, "status": new_status}
 
 
@@ -645,6 +667,7 @@ async def post_message(room_name: str, body: MessageRequest, agent: dict = Depen
     await db.commit()
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
+    _broadcast_ui("message")
     return {
         "id": msg_id,
         "room": room_name,
@@ -700,6 +723,7 @@ async def send_dm(target_id: str, body: DMRequest, agent: dict = Depends(auth_ag
     )
     await db.commit()
     _notify_agent(target_id)
+    _broadcast_ui("dm")
     return {
         "id": dm_id,
         "from_id": agent["id"],
@@ -837,6 +861,7 @@ async def upload_document(room_name: str, file: UploadFile = File(...), agent: d
     await db.commit()
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
+    _broadcast_ui("document")
     return {"id": doc_id, "filename": safe_name, "size": len(content)}
 
 
@@ -958,6 +983,7 @@ async def ui_create_room(request: Request, session: str = Depends(require_human)
         (room_id, name, topic, join_token, _now()),
     )
     await db.commit()
+    _broadcast_ui("rooms")
     return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
 
 
@@ -966,6 +992,30 @@ async def ui_rooms(session: str = Depends(require_human)):
     db = await get_db()
     rows = await db.execute_fetchall("SELECT id, name, topic, status, created_at FROM rooms ORDER BY created_at")
     return [dict(r) for r in rows]
+
+
+@app.get("/ui/api/events")
+async def ui_events(session: str = Depends(require_human)):
+    """SSE stream: tells connected dashboards to re-poll on join/leave/message/DM/etc.
+
+    Carries no per-event payload beyond a debug label — the browser just
+    re-runs its normal (cheap, idempotent) fetch functions on any tick.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    _ui_subscribers.add(queue)
+
+    async def gen():
+        try:
+            while True:
+                try:
+                    kind = await asyncio.wait_for(queue.get(), timeout=20)
+                    yield f"data: {kind}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"  # keep-alive comment, ignored by EventSource
+        finally:
+            _ui_subscribers.discard(queue)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/ui/api/rooms/{room_name}/token")
@@ -1045,6 +1095,7 @@ async def ui_send_message(room_name: str, request: Request, session: str = Depen
     await db.commit()
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
+    _broadcast_ui("message")
     return {
         "id": msg_id,
         "room": room_name,
@@ -1077,6 +1128,7 @@ async def ui_upload_document(room_name: str, file: UploadFile = File(...), sessi
     await db.commit()
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
+    _broadcast_ui("document")
     return {"id": doc_id, "filename": safe_name, "size": len(content)}
 
 
@@ -1097,6 +1149,7 @@ async def ui_send_dm(target_id: str, request: Request, session: str = Depends(re
     )
     await db.commit()
     _notify_agent(target_id)
+    _broadcast_ui("dm")
     return {
         "id": dm_id,
         "from_id": "human",
@@ -1163,6 +1216,7 @@ async def ui_set_room_status(room_name: str, request: Request, session: str = De
     room_id = await _get_room_id(db, room_name)
     await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
     await db.commit()
+    _broadcast_ui("room_status")
     return {"room": room_name, "status": new_status}
 
 
@@ -1176,6 +1230,7 @@ async def ui_remove_agent(agent_id: str, session: str = Depends(require_human)):
     await db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
     await db.commit()
     logger.info("Agent '%s' removed by human", agent_id)
+    _broadcast_ui("agents")
     return {"status": "removed", "agent_id": agent_id}
 
 
