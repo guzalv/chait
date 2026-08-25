@@ -587,3 +587,35 @@ def test_join_returns_empty_context_when_no_topic(client):
     agent = _join(client, room["join_token"], "Dev")
     assert agent["context"]["topic"] == ""
     assert agent["context"]["documents"] == []
+
+
+# ---------------------------------------------------------------------------
+# 15. Human sees agent-to-agent DMs within a room (god-mode visibility)
+# ---------------------------------------------------------------------------
+def test_human_sees_room_member_dms(client):
+    _login(client)
+    room = _create_room(client, "dm-room")
+    other_room = _create_room(client, "other-room")
+    a = _join(client, room["join_token"], "Alice")
+    b = _join(client, room["join_token"], "Bob")
+    outsider = _join(client, other_room["join_token"], "Eve")
+
+    # Agent-to-agent DM within the room
+    client.post(f"/api/v1/dm/{b['id']}", json={"text": "private to Bob"}, headers=_auth(a["agent_token"]))
+    # Human's own DM to Bob — should NOT appear (human is not in agents table)
+    client.post(f"/ui/api/dm/{b['id']}", json={"text": "human to Bob"})
+    # Cross-room DM must not leak
+    client.post(f"/api/v1/dm/{outsider['id']}", json={"text": "cross-room"}, headers=_auth(a["agent_token"]))
+
+    dms = client.get("/ui/api/rooms/dm-room/dms").json()
+    assert len(dms) == 1
+    assert dms[0]["from_id"] == a["id"]
+    assert dms[0]["to_id"] == b["id"]
+    assert dms[0]["text"] == "private to Bob"
+
+    # since-filter excludes the earlier message
+    ts = dms[0]["created_at"]
+    client.post(f"/api/v1/dm/{a['id']}", json={"text": "reply"}, headers=_auth(b["agent_token"]))
+    filtered = client.get("/ui/api/rooms/dm-room/dms", params={"since": ts}).json()
+    assert len(filtered) == 1
+    assert filtered[0]["text"] == "reply"

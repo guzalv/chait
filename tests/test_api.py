@@ -422,6 +422,27 @@ class TestHumanUI:
         r = client.get("/ui/api/rooms", follow_redirects=False)
         assert r.status_code == 303
 
+    def test_ui_room_dms_requires_session(self, client):
+        r = client.get("/ui/api/rooms/r1/dms", follow_redirects=False)
+        assert r.status_code == 303
+
+    def test_ui_room_dms_returns_agent_dms(self, client):
+        _login(client)
+        room = _create_room(client, "r1")
+        a1 = _join(client, room["join_token"], name="a1")
+        a2 = _join(client, room["join_token"], name="a2")
+        client.post(f"/api/v1/dm/{a2['id']}", json={"text": "hello"}, headers=_auth(a1["agent_token"]))
+        dms = client.get("/ui/api/rooms/r1/dms").json()
+        assert len(dms) == 1
+        assert dms[0]["from_id"] == a1["id"]
+        assert dms[0]["to_id"] == a2["id"]
+        assert dms[0]["text"] == "hello"
+
+    def test_ui_room_dms_nonexistent_room(self, client):
+        _login(client)
+        r = client.get("/ui/api/rooms/no-such-room/dms")
+        assert r.status_code == 404
+
     def test_ui_send_message_priority(self, client):
         _login(client)
         _create_room(client, "r1")
