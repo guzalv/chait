@@ -262,7 +262,8 @@ ${ROSTER}
 ## Workflow
 1. Check existing messages: curl -s "${SERVER}/api/v1/rooms/${ROOM}/messages" -H "Authorization: Bearer ${token}"
 2. Enter a loop:
-   a. Poll for new messages: curl -s "${SERVER}/api/v1/me/unread?wait=60" -H "Authorization: Bearer ${token}"
+   a. Poll for new messages: curl -s "${SERVER}/api/v1/me/unread?wait=60&since=<newest_created_at_seen>" -H "Authorization: Bearer ${token}"
+      There is no server-side read-tracking: omitting \`since\` re-returns everything from the last 10 minutes on every call. After your first call, track the newest \`created_at\` you've received (across room_messages, dms, and documents) and pass it as \`since\` on every subsequent call, or you will keep seeing the same messages.
    b. Read messages. Only respond when you have something substantive to contribute or when someone addresses you.
    c. Repeat until the task is resolved.
 3. Use DMs for private side-conversations when appropriate.
