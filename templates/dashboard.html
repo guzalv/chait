@@ -27,7 +27,26 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 .msg .meta .name{color:#38bdf8;font-weight:600}
 .msg .meta .role{color:#64748b}
 .msg .meta .priority-badge{background:#f87171;color:#fff;padding:1px 6px;border-radius:3px;font-size:.6rem;margin-left:4px}
-.msg .text{font-size:.85rem;white-space:pre-wrap;line-height:1.5}
+.msg .text{font-size:.85rem;line-height:1.5;overflow-wrap:break-word}
+.msg .text p{margin:0 0 .4em}
+.msg .text p:last-child{margin-bottom:0}
+.msg .text pre{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:.5rem;overflow-x:auto;margin:.4em 0;font-size:.8rem}
+.msg .text code{background:#1e293b;padding:.1em .3em;border-radius:3px;font-size:.8rem;font-family:'SF Mono','Fira Code',monospace}
+.msg .text pre code{background:none;padding:0;font-size:inherit}
+.msg .text ul,.msg .text ol{margin:.4em 0 .4em 1.5em}
+.msg .text blockquote{border-left:3px solid #475569;padding-left:.75rem;color:#94a3b8;margin:.4em 0}
+.msg .text h1,.msg .text h2,.msg .text h3,.msg .text h4{margin:.6em 0 .3em;color:#f1f5f9}
+.msg .text h1{font-size:1.1rem}.msg .text h2{font-size:1rem}.msg .text h3{font-size:.95rem}
+.msg .text table{border-collapse:collapse;margin:.4em 0;font-size:.8rem}
+.msg .text th,.msg .text td{border:1px solid #334155;padding:.25rem .5rem}
+.msg .text th{background:#1e293b}
+.msg .text a{color:#38bdf8}
+.msg .text hr{border:none;border-top:1px solid #334155;margin:.5em 0}
+.dm-msg .dm-text{font-size:.8rem;line-height:1.4;overflow-wrap:break-word}
+.dm-msg .dm-text p{margin:0 0 .3em}.dm-msg .dm-text p:last-child{margin-bottom:0}
+.dm-msg .dm-text pre{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:.4rem;overflow-x:auto;margin:.3em 0;font-size:.75rem}
+.dm-msg .dm-text code{background:#1e293b;padding:.1em .2em;border-radius:3px;font-size:.75rem;font-family:'SF Mono','Fira Code',monospace}
+.dm-msg .dm-text pre code{background:none;padding:0}
 .msg.priority{border-left:3px solid #f87171;padding-left:.5rem}
 .msg.human{border-left:3px solid #3b82f6;background:rgba(59,130,246,0.08);padding-left:.5rem;border-radius:4px}
 .msg.human .name{color:#60a5fa}
@@ -53,10 +72,10 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 .modal .btns{display:flex;gap:.5rem;justify-content:flex-end}
 .token-display{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:.5rem;font-family:'SF Mono','Fira Code',monospace;font-size:.8rem;color:#22c55e;word-break:break-all;margin:.5rem 0;cursor:pointer;user-select:all}
 .conn-status{font-size:.6rem;padding:2px 6px;border-radius:3px;color:#fff;margin-left:auto}
-#dm-messages{max-height:300px;overflow-y:auto;margin-bottom:.5rem;border:1px solid #334155;border-radius:4px;padding:.5rem;background:#0f172a}
-#dm-messages .dm-msg{margin-bottom:.4rem;font-size:.8rem}
-#dm-messages .dm-msg .dm-from{font-weight:600;color:#38bdf8}
-#dm-messages .dm-msg .dm-time{color:#64748b;font-size:.65rem;margin-left:.5rem}
+#dm-messages,#room-dms-messages{max-height:300px;overflow-y:auto;margin-bottom:.5rem;border:1px solid #334155;border-radius:4px;padding:.5rem;background:#0f172a}
+#dm-messages .dm-msg,#room-dms-messages .dm-msg{margin-bottom:.4rem;font-size:.8rem}
+#dm-messages .dm-msg .dm-from,#room-dms-messages .dm-msg .dm-from{font-weight:600;color:#38bdf8}
+#dm-messages .dm-msg .dm-time,#room-dms-messages .dm-msg .dm-time{color:#64748b;font-size:.65rem;margin-left:.5rem}
 .status-select{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:2px 4px;font-size:.7rem;cursor:pointer}
 .mobile-back{display:none;background:none;border:none;color:#38bdf8;font-size:1.1rem;cursor:pointer;padding:.25rem .5rem;margin-right:.25rem}
 .panel-toggle{display:none;background:none;border:1px solid #334155;color:#94a3b8;font-size:.75rem;cursor:pointer;padding:.25rem .5rem;border-radius:4px;margin-left:.5rem}
@@ -79,7 +98,10 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   .mobile-back{display:inline-block}
   .modal .modal-box{width:92vw;max-width:420px}
 }
-</style></head><body>
+</style>
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+</head><body>
 <div id="sidebar">
   <h1>chait <span id="conn-status" class="conn-status" style="background:#22c55e">Live</span>
     <span><button class="btn btn-sm" onclick="openNewRoom()">+ Room</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openApiTokens()">API Key</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="doLogout()">Logout</button></span>
@@ -91,7 +113,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   <div id="room-view" style="display:none;flex:1;flex-direction:column">
     <div id="room-header">
       <span><button class="mobile-back" onclick="showSidebar()">&larr;</button><span id="room-title"></span> <select id="room-status-select" class="status-select" onchange="changeRoomStatus(this.value)"></select></span>
-      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
+      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="openRoomDMs()" title="See all DMs between room members">Room DMs</button> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
     </div>
     <div id="messages"></div>
     <div id="input-area">
@@ -151,6 +173,15 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
     </div>
   </div>
 </div>
+<!-- Room DMs modal: read-only view of all DMs between this room's members -->
+<div id="room-dms-modal" class="modal">
+  <div class="modal-box">
+    <h3>Room DMs &mdash; <span id="room-dms-room-name"></span></h3>
+    <div style="color:#64748b;font-size:.7rem;margin-bottom:.5rem">Private messages between room members. Read-only.</div>
+    <div id="room-dms-messages"></div>
+    <div class="btns"><button class="btn btn-sm" style="background:#475569" onclick="closeRoomDMs()">Close</button></div>
+  </div>
+</div>
 <!-- API Token modal -->
 <div id="api-token-modal" class="modal">
   <div class="modal-box">
@@ -164,7 +195,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   </div>
 </div>
 <script>
-let currentRoom=null,pollInterval=null,lastTs=null,dmTargetId=null,dmPollId=null;
+let currentRoom=null,pollInterval=null,lastTs=null,dmTargetId=null,dmPollId=null,roomDmsPollId=null,currentMembers=[];
 let lastPollOk=Date.now();
 const lastRead=JSON.parse(sessionStorage.getItem('chait_lastRead')||'{}');
 function markRead(room,ts){if(ts){lastRead[room]=ts;sessionStorage.setItem('chait_lastRead',JSON.stringify(lastRead))}}
@@ -263,9 +294,12 @@ function fmtMsg(m){
   const cls=`msg${pri}${isHuman?' human':''}`;
   const badge=m.priority?'<span class="priority-badge">PRIORITY</span>':'';
   const t=new Date(m.created_at).toLocaleTimeString();
-  return `<div class="${cls}"><div class="meta"><span class="name">${esc(m.author_name)}</span> <span class="role">[${esc(m.author_role)}]</span> ${t}${badge}</div><div class="text">${esc(m.text)}</div></div>`;
+  return `<div class="${cls}"><div class="meta"><span class="name">${esc(m.author_name)}</span> <span class="role">[${esc(m.author_role)}]</span> ${t}${badge}</div><div class="text">${renderMd(m.text)}</div></div>`;
 }
 function esc(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
+// ponytail: marked + DOMPurify for safe markdown rendering (same approach as OpenChamber)
+marked.use({breaks:true,gfm:true,renderer:{html({text}){return esc(text)}}});
+function renderMd(s){if(s==null)return'';try{return DOMPurify.sanitize(marked.parse(String(s)),{FORBID_TAGS:['style'],FORBID_CONTENTS:['style']})}catch(e){return esc(s)}}
 function jsattr(s){return esc(JSON.stringify(s))}
 
 // --- Room details (plan 26: status control) ---
@@ -278,10 +312,11 @@ let lastAgentsHtml=null,lastDocsHtml=null;
 async function loadRoomDetails(){
   const room=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/details`);if(!room)return;
   document.getElementById('room-topic').textContent=room.topic||'';
+  currentMembers=room.members||[];
   const sel=document.getElementById('room-status-select');
   const statuses=['active','waiting-for-input','completed','blocked'];
   sel.innerHTML=statuses.map(s=>`<option value="${s}" ${s===room.status?'selected':''}>${s}</option>`).join('');
-  const agentsHtml=(room.members||[]).map(m=>{
+  const agentsHtml=currentMembers.map(m=>{
     const card=m.card||{};const skills=(card.skills||[]).join(', ');
     return `<div class="agent-card"><div class="agent-name">${esc(m.name)}</div><div class="agent-role">${esc(m.role)}</div>
       ${card.description?`<div class="agent-skills">${esc(card.description)}</div>`:''}
@@ -336,7 +371,7 @@ async function loadDMHistory(){
   if(!msgs.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem">No messages yet.</div>';return}
   el.innerHTML=msgs.map(m=>{
     const t=new Date(m.created_at).toLocaleTimeString();
-    return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)}</span><span class="dm-time">${t}</span><div>${esc(m.text)}</div></div>`;
+    return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)}</span><span class="dm-time">${t}</span><div class="dm-text">${renderMd(m.text)}</div></div>`;
   }).join('');
   el.scrollTop=el.scrollHeight;
 }
@@ -345,6 +380,36 @@ async function sendDM(){
   await api(`/ui/api/dm/${dmTargetId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
   document.getElementById('dm-input').value='';
   await loadDMHistory();
+}
+
+// --- Room DMs view: lets the human audit DMs between other room members ---
+function nameFor(id){
+  if(id==='human')return'Human';
+  const m=currentMembers.find(x=>x.id===id);
+  return m?m.name:id;
+}
+async function openRoomDMs(){
+  if(!currentRoom)return;
+  document.getElementById('room-dms-room-name').textContent=currentRoom;
+  document.getElementById('room-dms-modal').style.display='flex';
+  await loadRoomDMs();
+  roomDmsPollId=setInterval(loadRoomDMs,3000);
+}
+function closeRoomDMs(){
+  document.getElementById('room-dms-modal').style.display='none';
+  if(roomDmsPollId){clearInterval(roomDmsPollId);roomDmsPollId=null}
+}
+async function loadRoomDMs(){
+  if(!currentRoom)return;
+  const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/dms`);
+  if(!msgs)return;
+  const el=document.getElementById('room-dms-messages');
+  if(!msgs.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem">No DMs between room members yet.</div>';return}
+  el.innerHTML=msgs.map(m=>{
+    const t=new Date(m.created_at).toLocaleTimeString();
+    return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)} &rarr; ${esc(nameFor(m.to_id))}</span><span class="dm-time">${t}</span><div class="dm-text">${renderMd(m.text)}</div></div>`;
+  }).join('');
+  el.scrollTop=el.scrollHeight;
 }
 
 // --- Room/token modals ---
