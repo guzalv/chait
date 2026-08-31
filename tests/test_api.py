@@ -23,6 +23,7 @@ def client(tmp_path):
     server.DOCS_DIR = tmp_path / "documents"
     server._db = None
     server._unread_events.clear()
+    server._ui_subscribers.clear()
     server._rate_buckets.clear()
     with TestClient(app=server.app) as c:
         yield c
@@ -442,6 +443,10 @@ class TestHumanUI:
         _login(client)
         r = client.get("/ui/api/rooms/no-such-room/dms")
         assert r.status_code == 404
+
+    def test_ui_events_requires_session(self, client):
+        r = client.get("/ui/api/events", follow_redirects=False)
+        assert r.status_code == 303
 
     def test_ui_send_message_priority(self, client):
         _login(client)

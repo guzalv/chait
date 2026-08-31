@@ -195,8 +195,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   </div>
 </div>
 <script>
-let currentRoom=null,pollInterval=null,lastTs=null,dmTargetId=null,dmPollId=null,roomDmsPollId=null,currentMembers=[];
-let lastPollOk=Date.now();
+let currentRoom=null,lastTs=null,dmTargetId=null,currentMembers=[];
 const lastRead=JSON.parse(sessionStorage.getItem('chait_lastRead')||'{}');
 function markRead(room,ts){if(ts){lastRead[room]=ts;sessionStorage.setItem('chait_lastRead',JSON.stringify(lastRead))}}
 
@@ -206,7 +205,7 @@ async function api(p,o){
     const r=await fetch(p,o);
     if(r.status===303||r.redirected){location='/login';return null}
     if(!r.ok){console.error(`API ${r.status}: ${p}`);return null}
-    lastPollOk=Date.now();updateStatus('ok');return r.json();
+    updateStatus('ok');return r.json();
   }catch(e){console.error('Network error:',p,e);updateStatus('error');return null}
 }
 function updateStatus(s){
@@ -214,9 +213,27 @@ function updateStatus(s){
   if(s==='ok'){el.textContent='Live';el.style.background='#22c55e'}
   else{el.textContent='Disconnected';el.style.background='#ef4444'}
 }
-setInterval(()=>{if(Date.now()-lastPollOk>15000)updateStatus('error')},5000);
+
+// --- Live updates via SSE: one persistent connection replaces the old
+// setInterval polling loops. On any event, re-run the same fetch functions
+// that used to run on a timer — they're already cheap/idempotent (cursor-based
+// message polling, content-diffed detail rendering), so no per-event-type
+// filtering logic is needed. EventSource auto-reconnects natively on drop.
+function connectEvents(){
+  const es=new EventSource('/ui/api/events');
+  es.onopen=()=>updateStatus('ok');
+  es.onerror=()=>updateStatus('error');
+  es.onmessage=()=>{
+    updateStatus('ok');
+    loadRooms();
+    if(currentRoom){pollMessages();loadRoomDetails()}
+    if(dmTargetId)loadDMHistory();
+    if(document.getElementById('room-dms-modal').style.display==='flex')loadRoomDMs();
+  };
+}
 
 // --- Rooms (plan 23: unread indicators, plan 28e: sort/opacity) ---
+let lastRoomsHtml=null;
 async function loadRooms(){
   const [rooms,activity]=await Promise.all([api('/ui/api/rooms'),api('/ui/api/rooms/activity')]);
   if(!rooms)return;
@@ -226,13 +243,16 @@ async function loadRooms(){
   });
   const el=document.getElementById('rooms-list');
   if(!sorted.length){el.innerHTML='<div style="color:#64748b;padding:1rem;font-size:.8rem">No rooms yet. Click "+ Room" to create one.</div>';return}
-  el.innerHTML=sorted.map(r=>{
+  const roomsHtml=sorted.map(r=>{
     const sc='status-'+r.status;
     const hasUnread=activity&&activity[r.name]&&(!lastRead[r.name]||activity[r.name]>lastRead[r.name]);
     const dot=hasUnread?'<span class="unread-dot"></span>':'';
     return `<div class="room-item ${currentRoom===r.name?'active':''}" data-status="${esc(r.status)}" onclick="selectRoom(${jsattr(r.name)})">
       <span>${esc(r.name)}${dot}</span><span class="room-status ${sc}">${esc(r.status)}</span></div>`
   }).join('');
+  // ponytail: same stale-element-race guard as loadRoomDetails (5e5729f) —
+  // SSE now re-triggers this on every unrelated event, so skip identical writes.
+  if(roomsHtml!==lastRoomsHtml){lastRoomsHtml=roomsHtml;el.innerHTML=roomsHtml}
 }
 
 function isMobile(){return window.innerWidth<768}
@@ -266,7 +286,6 @@ async function selectRoom(name, pushHistory=true){
   if(msgs.length>0){lastTs=msgs[msgs.length-1].created_at;markRead(name,lastTs)}
   await loadRoomDetails();
   loadRooms();
-  if(pollInterval)clearInterval(pollInterval);pollInterval=setInterval(pollMessages,3000);
 }
 
 // --- Messages (plan 25: human styling, plan 28c: empty state) ---
@@ -356,24 +375,23 @@ async function openDM(id,name){
   document.getElementById('dm-modal').style.display='flex';
   await loadDMHistory();
   document.getElementById('dm-input').focus();
-  dmPollId=setInterval(loadDMHistory,3000);
 }
 function closeDM(){
   document.getElementById('dm-modal').style.display='none';
   dmTargetId=null;
-  if(dmPollId){clearInterval(dmPollId);dmPollId=null}
 }
+let lastDmHtml=null;
 async function loadDMHistory(){
   if(!dmTargetId)return;
   const msgs=await api(`/ui/api/dm/${dmTargetId}`);
   if(!msgs)return;
   const el=document.getElementById('dm-messages');
   if(!msgs.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem">No messages yet.</div>';return}
-  el.innerHTML=msgs.map(m=>{
+  const html=msgs.map(m=>{
     const t=new Date(m.created_at).toLocaleTimeString();
     return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)}</span><span class="dm-time">${t}</span><div class="dm-text">${renderMd(m.text)}</div></div>`;
   }).join('');
-  el.scrollTop=el.scrollHeight;
+  if(html!==lastDmHtml){lastDmHtml=html;el.innerHTML=html;el.scrollTop=el.scrollHeight}
 }
 async function sendDM(){
   const text=document.getElementById('dm-input').value.trim();if(!text||!dmTargetId)return;
@@ -393,23 +411,22 @@ async function openRoomDMs(){
   document.getElementById('room-dms-room-name').textContent=currentRoom;
   document.getElementById('room-dms-modal').style.display='flex';
   await loadRoomDMs();
-  roomDmsPollId=setInterval(loadRoomDMs,3000);
 }
 function closeRoomDMs(){
   document.getElementById('room-dms-modal').style.display='none';
-  if(roomDmsPollId){clearInterval(roomDmsPollId);roomDmsPollId=null}
 }
+let lastRoomDmsHtml=null;
 async function loadRoomDMs(){
   if(!currentRoom)return;
   const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/dms`);
   if(!msgs)return;
   const el=document.getElementById('room-dms-messages');
   if(!msgs.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem">No DMs between room members yet.</div>';return}
-  el.innerHTML=msgs.map(m=>{
+  const html=msgs.map(m=>{
     const t=new Date(m.created_at).toLocaleTimeString();
     return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)} &rarr; ${esc(nameFor(m.to_id))}</span><span class="dm-time">${t}</span><div class="dm-text">${renderMd(m.text)}</div></div>`;
   }).join('');
-  el.scrollTop=el.scrollHeight;
+  if(html!==lastRoomDmsHtml){lastRoomDmsHtml=html;el.innerHTML=html;el.scrollTop=el.scrollHeight}
 }
 
 // --- Room/token modals ---
@@ -476,13 +493,12 @@ window.addEventListener('popstate',e=>{
     document.getElementById('room-view').style.display='none';
     document.getElementById('no-room').style.display='flex';
     if(isMobile())showSidebar(false);
-    if(pollInterval){clearInterval(pollInterval);pollInterval=null}
     loadRooms();
   }
 });
 
 // --- Init (plan 28b: restore room) ---
-loadRooms();setInterval(loadRooms,10000);
+loadRooms();connectEvents();
 // Restore from hash or sessionStorage
 const hashRoom=decodeURIComponent(location.hash.slice(1));
 const savedRoom=hashRoom||sessionStorage.getItem('chait_room');

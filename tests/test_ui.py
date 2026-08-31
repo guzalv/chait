@@ -10,6 +10,7 @@ import multiprocessing
 import os
 import socket
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -473,9 +474,61 @@ class TestLiveUpdates:
         _api_post(
             server_url, f"/api/v1/rooms/{test_data['room']}/messages", {"text": unique}, token=test_data["agent_token"]
         )
-        # Wait for poll interval (3s in JS)
+        # SSE should deliver near-instantly; generous margin for CI jitter.
         time.sleep(5)
         assert unique in driver.find_element(By.ID, "messages").text
+
+
+# ── SSE live-update stream (raw HTTP, no browser needed) ───────────────────
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urlopen() follows redirects by default; disable that so a 303-to-login
+    surfaces as an HTTPError instead of silently landing on the login page."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+class TestSSEEndpoint:
+    def test_requires_login(self, server_url):
+        opener = urllib.request.build_opener(_NoRedirect)
+        try:
+            opener.open(f"{server_url}/ui/api/events")
+            assert False, "expected an error response for unauthenticated request"
+        except urllib.error.HTTPError as e:
+            assert e.code == 303
+
+    def test_delivers_event_on_new_message(self, server_url, test_data):
+        opener = _login_session(server_url)
+        resp = opener.open(f"{server_url}/ui/api/events")
+        assert resp.headers.get_content_type() == "text/event-stream"
+
+        result = {}
+
+        def read_one_event():
+            try:
+                for raw_line in resp:
+                    line = raw_line.decode().strip()
+                    if line.startswith("data:"):
+                        result["data"] = line
+                        return
+            except Exception as e:
+                result["error"] = e
+
+        t = threading.Thread(target=read_one_event, daemon=True)
+        t.start()
+        time.sleep(0.5)  # let the subscriber queue register server-side
+        unique = f"sse-{int(time.time())}"
+        _api_post(
+            server_url, f"/api/v1/rooms/{test_data['room']}/messages", {"text": unique}, token=test_data["agent_token"]
+        )
+        t.join(timeout=5)
+        resp.close()
+
+        assert not t.is_alive(), "SSE reader thread never received an event"
+        assert "error" not in result, f"SSE read error: {result.get('error')}"
+        assert result.get("data") == "data: message"
 
 
 # ── Mobile viewport tests ────────────────────────────────────────────────
