@@ -216,6 +216,63 @@ class TestRooms:
         )
         assert r.status_code == 400
 
+    def test_archive_room_hides_it_from_default_list(self, client):
+        _login(client)
+        _create_room(client, "r1")
+        r = client.post("/ui/api/rooms/r1/archive")
+        assert r.status_code == 200
+        assert r.json()["archived_at"]
+        names = [room["name"] for room in client.get("/ui/api/rooms").json()]
+        assert "r1" not in names
+
+    def test_list_archived_rooms(self, client):
+        _login(client)
+        _create_room(client, "r1")
+        _create_room(client, "r2")
+        client.post("/ui/api/rooms/r1/archive")
+        archived = [room["name"] for room in client.get("/ui/api/rooms?archived=true").json()]
+        assert archived == ["r1"]
+
+    def test_unarchive_room_restores_it(self, client):
+        _login(client)
+        _create_room(client, "r1")
+        client.post("/ui/api/rooms/r1/archive")
+        r = client.post("/ui/api/rooms/r1/unarchive")
+        assert r.status_code == 200
+        names = [room["name"] for room in client.get("/ui/api/rooms").json()]
+        assert "r1" in names
+
+    def test_archive_nonexistent_room_returns_404(self, client):
+        _login(client)
+        r = client.post("/ui/api/rooms/no-such-room/archive")
+        assert r.status_code == 404
+
+    def test_delete_room_removes_it_and_its_data(self, client):
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        client.post(
+            "/ui/api/rooms/r1/documents",
+            files={"file": ("f.txt", b"data", "text/plain")},
+        )
+        doc_dir = server.DOCS_DIR / room["id"]
+        assert doc_dir.exists()
+
+        r = client.delete("/ui/api/rooms/r1")
+        assert r.status_code == 200
+        assert r.json() == {"status": "deleted", "room": "r1"}
+
+        names = [room["name"] for room in client.get("/ui/api/rooms").json()]
+        assert "r1" not in names
+        assert not doc_dir.exists()
+        # The agent that was in the room is gone too.
+        assert client.get("/api/v1/rooms/r1", headers=_auth(agent["agent_token"])).status_code == 401
+
+    def test_delete_nonexistent_room_returns_404(self, client):
+        _login(client)
+        r = client.delete("/ui/api/rooms/no-such-room")
+        assert r.status_code == 404
+
 
 # ---------------------------------------------------------------------------
 # Messages

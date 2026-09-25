@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import secrets
+import shutil
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -183,6 +184,7 @@ async def init_db():
         ("status", "rooms", "'active'"),
         ("join_token", "rooms", "''"),
         ("expires_at", "agents", "NULL"),
+        ("archived_at", "rooms", "NULL"),
     ]:
         try:
             await _db.execute(f"SELECT {col} FROM {tbl} LIMIT 1")
@@ -988,9 +990,13 @@ async def ui_create_room(request: Request, session: str = Depends(require_human)
 
 
 @app.get("/ui/api/rooms")
-async def ui_rooms(session: str = Depends(require_human)):
+async def ui_rooms(archived: bool = False, session: str = Depends(require_human)):
+    """List rooms. By default returns active (non-archived) rooms; pass ?archived=true for the archived list."""
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT id, name, topic, status, created_at FROM rooms ORDER BY created_at")
+    cmp = "IS NOT NULL" if archived else "IS NULL"
+    rows = await db.execute_fetchall(
+        f"SELECT id, name, topic, status, created_at, archived_at FROM rooms WHERE archived_at {cmp} ORDER BY created_at"
+    )
     return [dict(r) for r in rows]
 
 
@@ -1218,6 +1224,44 @@ async def ui_set_room_status(room_name: str, request: Request, session: str = De
     await db.commit()
     _broadcast_ui("room_status")
     return {"room": room_name, "status": new_status}
+
+
+@app.post("/ui/api/rooms/{room_name}/archive")
+async def ui_archive_room(room_name: str, session: str = Depends(require_human)):
+    """Hide a room from the default list without deleting its data."""
+    db = await get_db()
+    room_id = await _get_room_id(db, room_name)
+    archived_at = _now()
+    await db.execute("UPDATE rooms SET archived_at = ? WHERE id = ?", (archived_at, room_id))
+    await db.commit()
+    _broadcast_ui("rooms")
+    return {"room": room_name, "archived_at": archived_at}
+
+
+@app.post("/ui/api/rooms/{room_name}/unarchive")
+async def ui_unarchive_room(room_name: str, session: str = Depends(require_human)):
+    db = await get_db()
+    room_id = await _get_room_id(db, room_name)
+    await db.execute("UPDATE rooms SET archived_at = NULL WHERE id = ?", (room_id,))
+    await db.commit()
+    _broadcast_ui("rooms")
+    return {"room": room_name, "archived_at": None}
+
+
+@app.delete("/ui/api/rooms/{room_name}")
+async def ui_delete_room(room_name: str, session: str = Depends(require_human)):
+    """Permanently delete a room and everything in it (agents, messages, documents)."""
+    db = await get_db()
+    room_id = await _get_room_id(db, room_name)
+    await db.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
+    await db.execute("DELETE FROM documents WHERE room_id = ?", (room_id,))
+    await db.execute("DELETE FROM agents WHERE room_id = ?", (room_id,))  # FK: must precede room delete
+    await db.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
+    await db.commit()
+    shutil.rmtree(DOCS_DIR / room_id, ignore_errors=True)
+    logger.info("Room '%s' deleted by human", room_name)
+    _broadcast_ui("rooms")
+    return {"status": "deleted", "room": room_name}
 
 
 # ---------------------------------------------------------------------------
