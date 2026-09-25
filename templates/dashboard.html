@@ -104,7 +104,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 </head><body>
 <div id="sidebar">
   <h1>chait <span id="conn-status" class="conn-status" style="background:#22c55e">Live</span>
-    <span><button class="btn btn-sm" onclick="openNewRoom()">+ Room</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openApiTokens()">API Key</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="doLogout()">Logout</button></span>
+    <span><button class="btn btn-sm" onclick="openNewRoom()">+ Room</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openArchivedRooms()">Archived</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openApiTokens()">API Key</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="doLogout()">Logout</button></span>
   </h1>
   <div id="rooms-list"></div>
 </div>
@@ -113,7 +113,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   <div id="room-view" style="display:none;flex:1;flex-direction:column">
     <div id="room-header">
       <span><button class="mobile-back" onclick="showSidebar()">&larr;</button><span id="room-title"></span> <select id="room-status-select" class="status-select" onchange="changeRoomStatus(this.value)"></select></span>
-      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="openRoomDMs()" title="See all DMs between room members">Room DMs</button> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
+      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="openRoomDMs()" title="See all DMs between room members">Room DMs</button> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="archiveRoom()" title="Hide from the room list without deleting it">Archive</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="deleteRoom(currentRoom)" title="Permanently delete this room">Delete</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
     </div>
     <div id="messages"></div>
     <div id="input-area">
@@ -183,6 +183,14 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
     <div style="color:#64748b;font-size:.7rem;margin-bottom:.5rem">Private messages between room members. Read-only.</div>
     <div id="room-dms-messages"></div>
     <div class="btns"><button class="btn btn-sm" style="background:#475569" onclick="closeRoomDMs()">Close</button></div>
+  </div>
+</div>
+<!-- Archived Rooms modal -->
+<div id="archived-rooms-modal" class="modal">
+  <div class="modal-box">
+    <h3>Archived Rooms</h3>
+    <div id="archived-rooms-list"></div>
+    <div class="btns"><button class="btn btn-sm" style="background:#475569" onclick="document.getElementById('archived-rooms-modal').style.display='none'">Close</button></div>
   </div>
 </div>
 <!-- API Token modal -->
@@ -355,6 +363,44 @@ async function loadRoomDetails(){
 async function changeRoomStatus(status){
   await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/status`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({status})});
   loadRooms();
+}
+
+// --- Archive / delete ---
+function backToSidebar(){
+  currentRoom=null;sessionStorage.removeItem('chait_room');
+  document.getElementById('room-view').style.display='none';
+  document.getElementById('no-room').style.display='flex';
+  history.pushState({room:null},'','#');
+  if(isMobile())showSidebar(false);
+}
+async function archiveRoom(){
+  if(!currentRoom)return;
+  await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/archive`,{method:'POST'});
+  backToSidebar();loadRooms();
+}
+async function unarchiveRoom(name){
+  await api(`/ui/api/rooms/${encodeURIComponent(name)}/unarchive`,{method:'POST'});
+  openArchivedRooms();loadRooms();
+}
+async function deleteRoom(name){
+  if(!name||!confirm(`Permanently delete room "${name}" and all its messages/documents? This cannot be undone.`))return;
+  await api(`/ui/api/rooms/${encodeURIComponent(name)}`,{method:'DELETE'});
+  if(currentRoom===name)backToSidebar();
+  if(document.getElementById('archived-rooms-modal').style.display==='flex')openArchivedRooms();
+  loadRooms();
+}
+async function openArchivedRooms(){
+  document.getElementById('archived-rooms-modal').style.display='flex';
+  const rooms=await api('/ui/api/rooms?archived=true');if(!rooms)return;
+  const el=document.getElementById('archived-rooms-list');
+  if(!rooms.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem">No archived rooms.</div>';return}
+  el.innerHTML=rooms.map(r=>
+    `<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.4rem">
+      <div style="flex:1;font-size:.8rem">${esc(r.name)}</div>
+      <button class="btn btn-sm" onclick="unarchiveRoom(${jsattr(r.name)})">Unarchive</button>
+      <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="deleteRoom(${jsattr(r.name)})">Delete</button>
+    </div>`
+  ).join('');
 }
 
 // --- Send message (plan 28a: auto-resize) ---
