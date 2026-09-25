@@ -23,26 +23,13 @@
 - Commit messages explain *why*, not *what*.
 - Create PRs as drafts (`gh pr create --draft`). Mark ready only when asked.
 - Don't force-push without confirming.
+- Every PR that changes the product must include a worklog entry in the same PR (see table below).
 
-## Worklog
+## Task-specific guidance
 
-Every PR that changes the product must include a worklog entry committed in the same PR.
+Check this table before doing one of these tasks — don't re-derive the format by digging through git history or old PRs.
 
-File: `docs/agent-worklog/<topic>.md` (kebab-case).
-
-Format:
-
-```markdown
-# <Topic>
-
-## Changes
-- What was done and why.
-
-## Decisions
-- Key choices made and alternatives rejected.
-
-## Testing
-- How changes were verified.
-```
-
-Append to an existing topic file if one fits. Avoid near-duplicates.
+| Task | File |
+|---|---|
+| Writing a PR description | `agents/pr-template.md` |
+| Writing a worklog entry | `agents/worklog-template.md` |
