@@ -144,7 +144,10 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
     <div id="new-room-result" style="display:none">
       <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Join token (copy this for agents):</div>
       <div class="token-display" id="new-room-token" onclick="navigator.clipboard.writeText(this.textContent)"></div>
-      <div style="color:#64748b;font-size:.65rem">Click token to copy</div>
+      <div style="color:#64748b;font-size:.65rem;margin-bottom:.75rem">Click token to copy</div>
+      <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Agent prompt (paste into an agent):</div>
+      <div class="token-display" id="new-room-prompt" onclick="navigator.clipboard.writeText(this.textContent)"></div>
+      <div style="color:#64748b;font-size:.65rem">Click to copy</div>
     </div>
     <div class="btns">
       <button class="btn btn-sm" style="background:#475569" onclick="closeNewRoom()">Close</button>
@@ -442,6 +445,7 @@ async function createRoom(){
   const files=document.getElementById('new-room-files').files;
   for(let i=0;i<files.length;i++){const fd=new FormData();fd.append('file',files[i]);await fetch(`/ui/api/rooms/${encodeURIComponent(name)}/documents`,{method:'POST',body:fd})}
   document.getElementById('new-room-token').textContent=data.join_token;
+  document.getElementById('new-room-prompt').textContent=`Read the instructions at ${location.origin}/api/v1/instructions and join the room to discuss about ${name} using join token ${data.join_token}.`;
   document.getElementById('new-room-result').style.display='block';
   btn.style.display='none';
   loadRooms();
