@@ -404,10 +404,23 @@ async function openArchivedRooms(){
 }
 
 // --- Send message (plan 28a: auto-resize) ---
+// Show a brief inline error next to an input without wiping the user's text.
+function sendError(inputId){
+  const input=document.getElementById(inputId);
+  let el=document.getElementById(inputId+'-err');
+  if(!el){
+    el=document.createElement('div');el.id=inputId+'-err';
+    el.style.cssText='color:#ef4444;font-size:.75rem;margin-top:.25rem';
+    input.insertAdjacentElement('afterend',el);
+  }
+  el.textContent='Send failed \u2014 your message was not sent. Try again.';
+  clearTimeout(el._t);el._t=setTimeout(()=>{el.textContent=''},5000);
+}
 async function sendMessage(){
   const input=document.getElementById('msg-input'),text=input.value.trim();
   if(!text||!currentRoom)return;
-  await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  const res=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/messages`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  if(!res){sendError('msg-input');return}
   input.value='';input.style.height='auto';await loadMessages();
 }
 async function uploadFile(){
@@ -444,7 +457,8 @@ async function loadDMHistory(){
 }
 async function sendDM(){
   const text=document.getElementById('dm-input').value.trim();if(!text||!dmTargetId)return;
-  await api(`/ui/api/dm/${dmTargetId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  const res=await api(`/ui/api/dm/${dmTargetId}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+  if(!res){sendError('dm-input');return}
   document.getElementById('dm-input').value='';
   await loadDMHistory();
 }
