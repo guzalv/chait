@@ -886,12 +886,18 @@ async def list_documents(room_name: str, agent: dict = Depends(auth_agent)):
 
 
 @app.get("/api/v1/documents/{doc_id}/download")
-async def download_document(doc_id: str, _auth: dict = Depends(auth_any)):
+async def download_document(doc_id: str, auth: dict = Depends(auth_any)):
     db = await get_db()
     rows = await db.execute_fetchall("SELECT * FROM documents WHERE id = ?", (doc_id,))
     if not rows:
         raise ApiError(404, "NOT_FOUND", "Document not found")
     doc = dict(rows[0])
+    if auth.get("type") != "human":
+        member = await db.execute_fetchall(
+            "SELECT 1 FROM agents WHERE id = ? AND room_id = ?", (auth["id"], doc["room_id"])
+        )
+        if not member:
+            raise ApiError(404, "NOT_FOUND", "Document not found")
     room_doc_dir = DOCS_DIR / doc["room_id"]
     for f in room_doc_dir.iterdir():
         if f.name.startswith(doc_id):

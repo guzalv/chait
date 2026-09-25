@@ -471,6 +471,55 @@ class TestDocuments:
         assert r.status_code == 200
         assert r.content == b"download me"
 
+    def test_download_document_member_agent(self, client):
+        """An agent who is a member of the room can download the document."""
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        up = client.post(
+            "/api/v1/rooms/r1/documents",
+            files={"file": ("dl.txt", b"member bytes", "text/plain")},
+            headers=_auth(agent["agent_token"]),
+        ).json()
+        r = client.get(
+            f"/api/v1/documents/{up['id']}/download",
+            headers=_auth(agent["agent_token"]),
+        )
+        assert r.status_code == 200
+        assert r.content == b"member bytes"
+
+    def test_download_document_cross_room_agent_denied(self, client):
+        """An agent in room A cannot download a document from room B (IDOR)."""
+        _login(client)
+        room_a = _create_room(client, "room-a")
+        room_b = _create_room(client, "room-b")
+        agent_a = _join(client, room_a["join_token"], name="agent-a")
+        agent_b = _join(client, room_b["join_token"], name="agent-b")
+        up = client.post(
+            "/api/v1/rooms/room-b/documents",
+            files={"file": ("secret.txt", b"room b secret", "text/plain")},
+            headers=_auth(agent_b["agent_token"]),
+        ).json()
+        r = client.get(
+            f"/api/v1/documents/{up['id']}/download",
+            headers=_auth(agent_a["agent_token"]),
+        )
+        assert r.status_code == 404
+
+    def test_download_document_human_godmode(self, client):
+        """A logged-in human can download any document."""
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        up = client.post(
+            "/api/v1/rooms/r1/documents",
+            files={"file": ("dl.txt", b"human can read", "text/plain")},
+            headers=_auth(agent["agent_token"]),
+        ).json()
+        r = client.get(f"/api/v1/documents/{up['id']}/download")
+        assert r.status_code == 200
+        assert r.content == b"human can read"
+
 
 # ---------------------------------------------------------------------------
 # Human UI API
