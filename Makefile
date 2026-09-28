@@ -30,7 +30,7 @@ deps: $(VENV) ## Install runtime dependencies
 	$(PIP) install -q -r requirements.txt
 
 test-deps: deps
-	$(PIP) install -q pytest httpx ruff
+	$(PIP) install -q pytest httpx ruff selenium
 
 $(VENV):
 	python3 -m venv $(VENV)
