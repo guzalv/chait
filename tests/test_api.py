@@ -1,6 +1,7 @@
 """Tests for chait server API."""
 
 import asyncio
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -69,6 +70,20 @@ def _auth(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+def _db_column_values(table, column):
+    """Read a column straight from the on-disk DB.
+
+    Opens a separate sqlite3 connection to server.DB_PATH; the server runs in WAL
+    mode, so a fresh reader sees all committed writes. Used to assert what's
+    persisted vs. what the API returns/sets in the cookie.
+    """
+    con = sqlite3.connect(server.DB_PATH)
+    try:
+        return {row[0] for row in con.execute(f"SELECT {column} FROM {table}")}
+    finally:
+        con.close()
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -98,6 +113,35 @@ class TestAuth:
     def test_invalid_token_returns_401(self, client):
         r = client.get("/api/v1/rooms", headers=_auth("sk-bogus"))
         assert r.status_code == 401
+
+    def test_agent_token_stored_hashed(self, client):
+        """agents.agent_token holds the SHA-256 hash, never the returned plaintext."""
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"], name="hasher")
+        plaintext = agent["agent_token"]
+        stored = _db_column_values("agents", "agent_token")
+        assert plaintext not in stored
+        assert server._hash_token(plaintext) in stored
+        # The plaintext still authenticates (hashed server-side on lookup).
+        r = client.get("/api/v1/me", headers=_auth(plaintext))
+        assert r.status_code == 200
+        assert r.json()["name"] == "hasher"
+
+    def test_session_token_stored_hashed(self, client):
+        """sessions.token holds the hash of the cookie value; logout revokes it."""
+        _login(client)
+        cookie = client.cookies.get("chait_session")
+        assert cookie
+        stored = _db_column_values("sessions", "token")
+        assert cookie not in stored
+        assert server._hash_token(cookie) in stored
+        # Authenticated UI call works with the plaintext cookie.
+        assert client.get("/ui/api/rooms").status_code == 200
+        # Logout deletes the hashed row; re-sending the original cookie is rejected.
+        client.post("/logout", follow_redirects=False)
+        r = client.get("/ui/api/rooms", headers={"Cookie": f"chait_session={cookie}"}, follow_redirects=False)
+        assert r.status_code == 303
 
 
 # ---------------------------------------------------------------------------
@@ -900,15 +944,24 @@ class TestErrorEnvelope:
 # ---------------------------------------------------------------------------
 class TestConcurrencyRaces:
     def test_join_same_name_is_idempotent(self, client):
-        """Joining the same name into the same room twice reuses one agent row."""
+        """Re-joining same name+room reuses the row (same id) but ROTATES the token.
+
+        Tokens are stored hashed, so the original plaintext can't be returned on
+        re-join; the server issues a fresh one bound to the same identity and
+        invalidates the old one.
+        """
         _login(client)
         room = _create_room(client, "r1")
         a1 = _join(client, room["join_token"], name="dup-agent")
         a2 = _join(client, room["join_token"], name="dup-agent")
         assert a1["id"] == a2["id"]
-        # Exactly one agent row for (name, room) — no duplicate.
-        members = client.get("/api/v1/rooms/r1", headers=_auth(a1["agent_token"])).json()["members"]
+        # Exactly one agent row for (name, room) — no duplicate. Authenticate with
+        # the current (rotated) token.
+        members = client.get("/api/v1/rooms/r1", headers=_auth(a2["agent_token"])).json()["members"]
         assert [m["name"] for m in members].count("dup-agent") == 1
+        # Rotation invalidates the previous token.
+        assert a2["agent_token"] != a1["agent_token"]
+        assert client.get("/api/v1/me", headers=_auth(a1["agent_token"])).status_code == 401
 
     def test_duplicate_room_returns_existing_once(self, client):
         """Creating a room with an existing name returns the existing one."""
