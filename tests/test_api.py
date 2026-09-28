@@ -848,3 +848,70 @@ class TestInstructions:
         assert "text/markdown" in r.headers["content-type"]
         assert "chait API" in r.text
         assert "http://testserver/api/v1" in r.text
+
+
+# ---------------------------------------------------------------------------
+# Unified error envelope
+# ---------------------------------------------------------------------------
+class TestErrorEnvelope:
+    def test_missing_field_envelope(self, client):
+        """Raw-body validation raises ApiError -> documented MISSING_FIELD code."""
+        _login(client)
+        r = client.post("/ui/api/rooms", json={"topic": "x"})
+        assert r.status_code == 400
+        body = r.json()
+        assert body["error"]["code"] == "MISSING_FIELD"
+        assert body["error"]["field"] == "name"
+
+    def test_not_found_envelope(self, client):
+        """A raw HTTPException(404) is wrapped by the generic handler."""
+        _login(client)
+        r = client.get("/ui/api/rooms/nope/token")
+        assert r.status_code == 404
+        assert r.json()["error"]["code"] == "NOT_FOUND"
+
+    def test_validation_error_envelope(self, client):
+        """FastAPI RequestValidationError (422) uses the same envelope."""
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        r = client.get("/api/v1/rooms/r1/messages", params={"limit": -1}, headers=_auth(agent["agent_token"]))
+        assert r.status_code == 422
+        assert r.json()["error"]["code"] == "INVALID_FIELD"
+
+    def test_unauthenticated_ui_redirect_preserved(self, client):
+        """CRITICAL: require_human's 303 must stay a real redirect, not JSON.
+
+        Breaking this sends unauthenticated humans a JSON error instead of the
+        login page, breaking the whole UI (and the UI test suite).
+        """
+        r = client.get("/ui/api/rooms/any/token", follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/login"
+        assert "error" not in (r.text or "")
+
+
+# ---------------------------------------------------------------------------
+# Check-then-insert races (idempotency contract)
+# ---------------------------------------------------------------------------
+class TestConcurrencyRaces:
+    def test_join_same_name_is_idempotent(self, client):
+        """Joining the same name into the same room twice reuses one agent row."""
+        _login(client)
+        room = _create_room(client, "r1")
+        a1 = _join(client, room["join_token"], name="dup-agent")
+        a2 = _join(client, room["join_token"], name="dup-agent")
+        assert a1["id"] == a2["id"]
+        # Exactly one agent row for (name, room) — no duplicate.
+        members = client.get("/api/v1/rooms/r1", headers=_auth(a1["agent_token"])).json()["members"]
+        assert [m["name"] for m in members].count("dup-agent") == 1
+
+    def test_duplicate_room_returns_existing_once(self, client):
+        """Creating a room with an existing name returns the existing one."""
+        _login(client)
+        first = _create_room(client, "dup-room")
+        second = _create_room(client, "dup-room")
+        assert second["id"] == first["id"]
+        assert second["existing"] is True
+        rooms = client.get("/ui/api/rooms").json()
+        assert [r["name"] for r in rooms].count("dup-room") == 1
