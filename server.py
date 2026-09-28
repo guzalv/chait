@@ -477,6 +477,44 @@ async def _reject_oversized_body(request: Request, call_next):
     return await call_next(request)
 
 
+# CSP relies on 'unsafe-inline' because the dashboard is inline-heavy (inline
+# <style>, inline <script>, inline style="" and onclick/onkeydown handlers), so
+# DOMPurify stays the PRIMARY XSS defense — the CSP is defense-in-depth: it still
+# restricts external sources (only self + jsdelivr for the two libs), blocks
+# framing (frame-ancestors 'none' / X-Frame-Options), locks base-uri, and denies
+# plugins (object-src 'none').
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https:; "
+    "connect-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    """Set hardening headers on every response (incl. SSE stream and redirects).
+
+    Setting headers on StreamingResponse/redirects is harmless, so we apply them
+    uniformly rather than per-route.
+    """
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = _CSP
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    # HSTS only behind TLS: sending it over plain-HTTP dev would pin browsers to
+    # https for a year against a server that isn't serving it.
+    if SECURE_COOKIES:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
 # ---------------------------------------------------------------------------
 # Structured errors (plan 33)
 # ---------------------------------------------------------------------------
