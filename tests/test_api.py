@@ -30,10 +30,15 @@ def client(tmp_path):
 
 
 def _login(client):
-    """Login as human, stores session cookie on client."""
+    """Login as human, stores session cookie on client.
+
+    Reads server.HUMAN_PASS dynamically: app startup regenerates the default
+    ``changeme`` password (see _ensure_human_password), so the current value
+    lives on the module global by the time we log in.
+    """
     r = client.post(
         "/login",
-        data={"user": "admin", "password": "changeme"},
+        data={"user": server.HUMAN_USER, "password": server.HUMAN_PASS},
         follow_redirects=False,
     )
     assert r.status_code == 303
@@ -769,6 +774,67 @@ class TestAPITokenManagement:
         r = client.post("/ui/api/tokens", follow_redirects=False)
         assert r.status_code == 303
         r = client.get("/ui/api/tokens", follow_redirects=False)
+        assert r.status_code == 303
+
+
+# ---------------------------------------------------------------------------
+# Security hardening
+# ---------------------------------------------------------------------------
+class TestSecurityHardening:
+    def test_login_cookie_secure_when_enabled(self, client, monkeypatch):
+        monkeypatch.setattr(server, "SECURE_COOKIES", True)
+        r = client.post(
+            "/login",
+            data={"user": server.HUMAN_USER, "password": server.HUMAN_PASS},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert "Secure" in r.headers.get("set-cookie", "")
+
+    def test_login_cookie_not_secure_by_default(self, client, monkeypatch):
+        monkeypatch.setattr(server, "SECURE_COOKIES", False)
+        r = client.post(
+            "/login",
+            data={"user": server.HUMAN_USER, "password": server.HUMAN_PASS},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        assert "Secure" not in r.headers.get("set-cookie", "")
+
+    def test_ensure_human_password_replaces_default(self):
+        saved = server.HUMAN_PASS
+        try:
+            server.HUMAN_PASS = "changeme"
+            server._ensure_human_password()
+            assert server.HUMAN_PASS != "changeme"
+            assert server.HUMAN_PASS
+        finally:
+            server.HUMAN_PASS = saved
+
+    def test_ensure_human_password_keeps_custom(self):
+        saved = server.HUMAN_PASS
+        try:
+            server.HUMAN_PASS = "operator-set-secret"
+            server._ensure_human_password()
+            assert server.HUMAN_PASS == "operator-set-secret"
+        finally:
+            server.HUMAN_PASS = saved
+
+    def test_oversized_body_rejected_by_middleware(self, client, monkeypatch):
+        # ceiling = MAX_UPLOAD_BYTES + 1_000_000 -> 1_000_000 here
+        monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 0)
+        big = b"x" * 1_048_576  # 1 MiB > ceiling
+        r = client.post("/login", content=big)
+        assert r.status_code == 413
+        assert r.json()["error"]["code"] == "TOO_LARGE"
+
+    def test_normal_request_passes_middleware(self, client, monkeypatch):
+        monkeypatch.setattr(server, "MAX_UPLOAD_BYTES", 0)
+        r = client.post(
+            "/login",
+            data={"user": server.HUMAN_USER, "password": server.HUMAN_PASS},
+            follow_redirects=False,
+        )
         assert r.status_code == 303
 
 

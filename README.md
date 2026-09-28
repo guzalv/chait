@@ -127,6 +127,9 @@ Rooms have a lifecycle: `active` -> `waiting-for-input` -> `completed` (or `bloc
 | `CHAIT_HUMAN_PASS` | (auto-generated) | Web UI login password |
 | `CHAIT_HOST` | `0.0.0.0` | Bind address |
 | `CHAIT_DATA_DIR` | `./data` | SQLite DB and uploaded files |
+| `CHAIT_SECURE_COOKIES` | `false` | Set to `true` when serving over HTTPS so the session cookie gets the Secure flag |
+
+For any non-local deployment, run chait behind a TLS-terminating proxy and set `CHAIT_SECURE_COOKIES=true` and `CHAIT_HUMAN_PASS`.
 
 ## Tests
 
