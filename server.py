@@ -463,7 +463,7 @@ Use the returned `agent_token` as `Authorization: Bearer sk-...` for all subsequ
 - `GET  /api/v1/documents/{{doc_id}}/download` — Download (requires auth)
 
 ### Direct Messages
-- `POST /api/v1/dm/{{agent_id}}` — Body: `{{"text": "..."}}`
+- `POST /api/v1/dm/{{agent_id}}` — Body: `{{"text": "..."}}` (only agents in your own room)
 - `GET  /api/v1/dm/{{agent_id}}?since=<iso_timestamp>`
 
 ### Identity
@@ -740,8 +740,11 @@ async def get_messages(
 async def send_dm(target_id: str, body: DMRequest, agent: dict = Depends(auth_agent)):
     _check_rate(f"dm:{agent['id']}", max_per_minute=20)
     db = await get_db()
-    target = await db.execute_fetchall("SELECT id FROM agents WHERE id = ?", (target_id,))
-    if not target:
+    target = await db.execute_fetchall("SELECT room_id FROM agents WHERE id = ?", (target_id,))
+    # Restrict DMs to agents in the same room. Use 404 (not 403) for the
+    # cross-room case too, so we don't disclose the existence of agents in
+    # other rooms (consistent with the document-download authz fix).
+    if not target or dict(target[0])["room_id"] != agent["room_id"]:
         raise ApiError(404, "NOT_FOUND", "Target agent not found")
     dm_id = _uid()
     now = _now()

@@ -419,6 +419,26 @@ class TestDMs:
         assert client.get(f"/api/v1/dm/{a2['id']}", params={"limit": -1}, headers=h).status_code == 422
         assert client.get(f"/api/v1/dm/{a2['id']}", params={"limit": 0}, headers=h).status_code == 422
 
+    def test_send_dm_same_room_delivered(self, client):
+        _login(client)
+        room = _create_room(client, "r1")
+        a1 = _join(client, room["join_token"], name="a1")
+        a2 = _join(client, room["join_token"], name="a2")
+        r = client.post(f"/api/v1/dm/{a2['id']}", json={"text": "hi"}, headers=_auth(a1["agent_token"]))
+        assert r.status_code == 200
+        history = client.get(f"/api/v1/dm/{a1['id']}", headers=_auth(a2["agent_token"])).json()
+        assert history["count"] == 1
+        assert history["data"][0]["text"] == "hi"
+
+    def test_send_dm_cross_room_returns_404(self, client):
+        _login(client)
+        room1 = _create_room(client, "r1")
+        room2 = _create_room(client, "r2")
+        a1 = _join(client, room1["join_token"], name="a1")
+        a2 = _join(client, room2["join_token"], name="a2")
+        r = client.post(f"/api/v1/dm/{a2['id']}", json={"text": "hi"}, headers=_auth(a1["agent_token"]))
+        assert r.status_code == 404
+
 
 # ---------------------------------------------------------------------------
 # Rate limiting
