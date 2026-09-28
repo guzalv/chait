@@ -26,11 +26,11 @@ lint: test-deps ## Run linter + format check
 fmt: test-deps ## Auto-format code
 	$(VENV)/bin/ruff format server.py tests/
 
-deps: $(VENV) ## Install runtime dependencies
-	$(PIP) install -q -r requirements.txt
+deps: $(VENV) ## Install runtime dependencies (pinned)
+	$(PIP) install -q -r requirements.lock
 
-test-deps: deps
-	$(PIP) install -q pytest httpx ruff selenium
+test-deps: $(VENV) ## Install runtime + dev dependencies (pinned superset)
+	$(PIP) install -q -r requirements-dev.lock
 
 $(VENV):
 	python3 -m venv $(VENV)

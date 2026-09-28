@@ -133,6 +133,8 @@ For any non-local deployment, run chait behind a TLS-terminating proxy and set `
 
 ## Tests
 
+chait requires **Python >= 3.11**. Dependencies are fully pinned (including transitives) in `requirements.lock` (runtime) and `requirements-dev.lock` (runtime + dev tools). `requirements.txt` lists the direct deps; regenerate a lock in a clean venv with `pip install -r requirements.txt [pytest httpx ruff selenium] && pip freeze > requirements[-dev].lock`.
+
 ```bash
 make test               # all tests (API + integration + UI)
 make test-api           # API tests (no server needed)

@@ -3,8 +3,8 @@ WORKDIR /app
 
 RUN useradd -r -s /bin/false chait && mkdir -p /data && chown chait:chait /data
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 COPY server.py .
 COPY templates/ templates/
