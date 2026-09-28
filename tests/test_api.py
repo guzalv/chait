@@ -1,5 +1,6 @@
 """Tests for chait server API."""
 
+import asyncio
 import sys
 import time
 from datetime import datetime, timezone
@@ -25,6 +26,9 @@ def client(tmp_path):
     server._unread_events.clear()
     server._ui_subscribers.clear()
     server._rate_buckets.clear()
+    # Fresh, unbound lock per test: an asyncio.Lock binds to the first event loop
+    # that contends it, and each TestClient runs in its own portal loop.
+    server._write_lock = asyncio.Lock()
     with TestClient(app=server.app) as c:
         yield c
 
@@ -915,3 +919,42 @@ class TestConcurrencyRaces:
         assert second["existing"] is True
         rooms = client.get("/ui/api/rooms").json()
         assert [r["name"] for r in rooms].count("dup-room") == 1
+
+
+# ---------------------------------------------------------------------------
+# Write serialization behind _write_lock
+# ---------------------------------------------------------------------------
+class TestWriteSerialization:
+    """Guards the single-connection write-isolation fix.
+
+    NOTE: TestClass::test_delete_room_removes_it_and_its_data (in TestRooms)
+    is the atomicity regression guard for ui_delete_room's 4-DELETE sequence:
+    it asserts a deleted room leaves no rooms/agents/messages/documents behind.
+    """
+
+    def test_write_lock_is_asyncio_lock(self):
+        assert isinstance(server._write_lock, asyncio.Lock)
+
+    def test_concurrent_message_posts_all_persist_once(self, client):
+        """20 concurrent posts to one room must each persist exactly once.
+
+        Fires the requests concurrently in the TestClient's portal event loop
+        (asyncio.to_thread over the blocking client), so they genuinely contend
+        _write_lock. With writes serialized, each commit() flushes only its own
+        INSERT: the final count is exactly 20, every body appears once, and no
+        request errors (a lost commit or a deadlock would fail this).
+        """
+        _login(client)
+        _create_room(client, "race")
+        n = 20
+
+        def _post(i):
+            return client.post("/ui/api/rooms/race/messages", json={"text": f"m{i}"})
+
+        async def _fire():
+            return await asyncio.gather(*[asyncio.to_thread(_post, i) for i in range(n)])
+
+        results = asyncio.run(_fire())
+        assert all(r.status_code == 200 for r in results)
+        texts = sorted(m["text"] for m in client.get("/ui/api/rooms/race/messages").json())
+        assert texts == sorted(f"m{i}" for i in range(n))

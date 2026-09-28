@@ -129,6 +129,11 @@ def _broadcast_ui(kind: str):
 # ---------------------------------------------------------------------------
 _db: Optional[aiosqlite.Connection] = None
 
+# Single shared DB connection: every write (INSERT/UPDATE/DELETE + commit) must
+# run under _write_lock so one coroutine's commit() can't flush another's
+# uncommitted writes, and multi-statement ops stay atomic.
+_write_lock = asyncio.Lock()
+
 
 async def get_db() -> aiosqlite.Connection:
     if _db is None:
@@ -627,8 +632,9 @@ async def join_with_token(request: Request, body: JoinRequest):
     if existing:
         agent = dict(existing[0])
         if card:
-            await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
-            await db.commit()
+            async with _write_lock:
+                await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
+                await db.commit()
         agent_id = agent["id"]
         agent_token = agent["agent_token"]
         logger.info("Agent '%s' re-joined room '%s' (existing)", name, room["name"])
@@ -638,28 +644,29 @@ async def join_with_token(request: Request, body: JoinRequest):
         expires = (
             (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
         )
-        try:
-            await db.execute(
-                "INSERT INTO agents (id, name, role, agent_token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
-            )
-            await db.commit()
-            logger.info("Agent '%s' (role=%s) joined room '%s'", name, role, room["name"])
-        except aiosqlite.IntegrityError:
-            # A concurrent request inserted the same (name, room_id) first (unique
-            # index). Reuse that agent so the join stays idempotent instead of 500.
-            await db.rollback()
-            existing = await db.execute_fetchall(
-                "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"])
-            )
-            agent = dict(existing[0])
-            agent_id = agent["id"]
-            agent_token = agent["agent_token"]
-            role = agent["role"]
-            if card:
-                await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent_id))
+        async with _write_lock:
+            try:
+                await db.execute(
+                    "INSERT INTO agents (id, name, role, agent_token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
+                )
                 await db.commit()
-            logger.info("Agent '%s' re-joined room '%s' (existing, race resolved)", name, room["name"])
+                logger.info("Agent '%s' (role=%s) joined room '%s'", name, role, room["name"])
+            except aiosqlite.IntegrityError:
+                # A concurrent request inserted the same (name, room_id) first (unique
+                # index). Reuse that agent so the join stays idempotent instead of 500.
+                await db.rollback()
+                existing = await db.execute_fetchall(
+                    "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"])
+                )
+                agent = dict(existing[0])
+                agent_id = agent["id"]
+                agent_token = agent["agent_token"]
+                role = agent["role"]
+                if card:
+                    await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent_id))
+                    await db.commit()
+                logger.info("Agent '%s' re-joined room '%s' (existing, race resolved)", name, room["name"])
     _broadcast_ui("agents")
     # Include room context so agents know what they're joining
     docs = await db.execute_fetchall(
@@ -699,18 +706,19 @@ async def api_create_room(body: RoomCreateRequest, _token: str = Depends(auth_ma
         }
     room_id = _uid()
     join_token = f"chait-{secrets.token_hex(16)}"
-    try:
-        await db.execute(
-            "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
-            (room_id, name, topic, join_token, _now()),
-        )
-        await db.commit()
-    except aiosqlite.IntegrityError:
-        # Concurrent create won the race (rooms.name is UNIQUE): return the
-        # existing room instead of 500, matching the check-then-return path.
-        await db.rollback()
-        row = dict((await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,)))[0])
-        return {"id": row["id"], "name": name, "join_token": row["join_token"], "existing": True}
+    async with _write_lock:
+        try:
+            await db.execute(
+                "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
+                (room_id, name, topic, join_token, _now()),
+            )
+            await db.commit()
+        except aiosqlite.IntegrityError:
+            # Concurrent create won the race (rooms.name is UNIQUE): return the
+            # existing room instead of 500, matching the check-then-return path.
+            await db.rollback()
+            row = dict((await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,)))[0])
+            return {"id": row["id"], "name": name, "join_token": row["join_token"], "existing": True}
     logger.info("Room '%s' created (id=%s)", name, room_id)
     _broadcast_ui("rooms")
     return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
@@ -727,8 +735,9 @@ async def me_endpoint(agent: dict = Depends(auth_agent)):
 @app.put("/api/v1/me/card")
 async def update_card(card: dict, agent: dict = Depends(auth_agent)):
     db = await get_db()
-    await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
+        await db.commit()
     return {"updated": True, "card": card}
 
 
@@ -736,8 +745,9 @@ async def update_card(card: dict, agent: dict = Depends(auth_agent)):
 async def deregister(agent: dict = Depends(auth_agent)):
     """Agent self-deregister: deletes identity."""
     db = await get_db()
-    await db.execute("DELETE FROM agents WHERE id = ?", (agent["id"],))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("DELETE FROM agents WHERE id = ?", (agent["id"],))
+        await db.commit()
     logger.info("Agent '%s' deregistered", agent["name"])
     _broadcast_ui("agents")
     return {"status": "deregistered"}
@@ -792,8 +802,9 @@ async def set_room_status(room_name: str, body: StatusUpdateRequest, agent: dict
         )
     db = await get_db()
     room_id = await _require_room_member(db, room_name, agent["id"])
-    await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
+        await db.commit()
     _broadcast_ui("room_status")
     return {"room": room_name, "status": new_status}
 
@@ -808,11 +819,12 @@ async def post_message(room_name: str, body: MessageRequest, agent: dict = Depen
     room_id = await _require_room_member(db, room_name, agent["id"])
     msg_id = _uid()
     now = _now()
-    await db.execute(
-        "INSERT INTO messages (id, room_id, author_id, author_name, author_role, text, reply_to, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (msg_id, room_id, agent["id"], agent["name"], agent["role"], body.text, body.reply_to, 0, now),
-    )
-    await db.commit()
+    async with _write_lock:
+        await db.execute(
+            "INSERT INTO messages (id, room_id, author_id, author_name, author_role, text, reply_to, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (msg_id, room_id, agent["id"], agent["name"], agent["role"], body.text, body.reply_to, 0, now),
+        )
+        await db.commit()
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
     _broadcast_ui("message")
@@ -868,11 +880,12 @@ async def send_dm(target_id: str, body: DMRequest, agent: dict = Depends(auth_ag
         raise ApiError(404, "NOT_FOUND", "Target agent not found")
     dm_id = _uid()
     now = _now()
-    await db.execute(
-        "INSERT INTO dms (id, from_id, from_name, to_id, text, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (dm_id, agent["id"], agent["name"], target_id, body.text, 0, now),
-    )
-    await db.commit()
+    async with _write_lock:
+        await db.execute(
+            "INSERT INTO dms (id, from_id, from_name, to_id, text, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (dm_id, agent["id"], agent["name"], target_id, body.text, 0, now),
+        )
+        await db.commit()
     _notify_agent(target_id)
     _broadcast_ui("dm")
     return {
@@ -1005,11 +1018,12 @@ async def upload_document(room_name: str, file: UploadFile = File(...), agent: d
         raise ApiError(413, "TOO_LARGE", "File too large (50 MB max)")
     safe_name = Path(file.filename).name or "unnamed"
     await asyncio.to_thread((room_doc_dir / f"{doc_id}_{safe_name}").write_bytes, content)
-    await db.execute(
-        "INSERT INTO documents (id, room_id, filename, content_type, uploaded_by, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc_id, room_id, safe_name, file.content_type, agent["id"], len(content), _now()),
-    )
-    await db.commit()
+    async with _write_lock:
+        await db.execute(
+            "INSERT INTO documents (id, room_id, filename, content_type, uploaded_by, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (doc_id, room_id, safe_name, file.content_type, agent["id"], len(content), _now()),
+        )
+        await db.commit()
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members, exclude=agent["id"])
     _broadcast_ui("document")
@@ -1075,8 +1089,9 @@ async def login_submit(request: Request):
     ):
         db = await get_db()
         tok = secrets.token_hex(32)
-        await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (tok, _now()))
-        await db.commit()
+        async with _write_lock:
+            await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (tok, _now()))
+            await db.commit()
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", secure=SECURE_COOKIES, max_age=86400 * 7)
         return resp
@@ -1094,8 +1109,9 @@ async def logout(request: Request):
     session_token = request.cookies.get("chait_session")
     if session_token:
         db = await get_db()
-        await db.execute("DELETE FROM sessions WHERE token = ?", (session_token,))
-        await db.commit()
+        async with _write_lock:
+            await db.execute("DELETE FROM sessions WHERE token = ?", (session_token,))
+            await db.commit()
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie("chait_session")
     return resp
@@ -1137,18 +1153,19 @@ async def ui_create_room(request: Request, session: str = Depends(require_human)
         }
     room_id = _uid()
     join_token = f"chait-{secrets.token_hex(16)}"
-    try:
-        await db.execute(
-            "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
-            (room_id, name, topic, join_token, _now()),
-        )
-        await db.commit()
-    except aiosqlite.IntegrityError:
-        # Concurrent create won the race (rooms.name is UNIQUE): return the
-        # existing room instead of 500, matching the check-then-return path.
-        await db.rollback()
-        row = dict((await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,)))[0])
-        return {"id": row["id"], "name": name, "join_token": row["join_token"], "existing": True}
+    async with _write_lock:
+        try:
+            await db.execute(
+                "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
+                (room_id, name, topic, join_token, _now()),
+            )
+            await db.commit()
+        except aiosqlite.IntegrityError:
+            # Concurrent create won the race (rooms.name is UNIQUE): return the
+            # existing room instead of 500, matching the check-then-return path.
+            await db.rollback()
+            row = dict((await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,)))[0])
+            return {"id": row["id"], "name": name, "join_token": row["join_token"], "existing": True}
     _broadcast_ui("rooms")
     return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
 
@@ -1258,11 +1275,12 @@ async def ui_send_message(room_name: str, request: Request, session: str = Depen
     room_id = await _get_room_id(db, room_name)
     msg_id = _uid()
     now = _now()
-    await db.execute(
-        "INSERT INTO messages (id, room_id, author_id, author_name, author_role, text, reply_to, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (msg_id, room_id, "human", "Human", "god", text, None, 1, now),
-    )
-    await db.commit()
+    async with _write_lock:
+        await db.execute(
+            "INSERT INTO messages (id, room_id, author_id, author_name, author_role, text, reply_to, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (msg_id, room_id, "human", "Human", "god", text, None, 1, now),
+        )
+        await db.commit()
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
     _broadcast_ui("message")
@@ -1291,11 +1309,12 @@ async def ui_upload_document(room_name: str, file: UploadFile = File(...), sessi
         raise ApiError(413, "TOO_LARGE", "File too large (50 MB max)")
     safe_name = Path(file.filename).name or "unnamed"
     await asyncio.to_thread((room_doc_dir / f"{doc_id}_{safe_name}").write_bytes, content)
-    await db.execute(
-        "INSERT INTO documents (id, room_id, filename, content_type, uploaded_by, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc_id, room_id, safe_name, file.content_type, "human", len(content), _now()),
-    )
-    await db.commit()
+    async with _write_lock:
+        await db.execute(
+            "INSERT INTO documents (id, room_id, filename, content_type, uploaded_by, size, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (doc_id, room_id, safe_name, file.content_type, "human", len(content), _now()),
+        )
+        await db.commit()
     members = await db.execute_fetchall("SELECT id FROM agents WHERE room_id = ?", (room_id,))
     _notify_room_members(members)
     _broadcast_ui("document")
@@ -1313,11 +1332,12 @@ async def ui_send_dm(target_id: str, request: Request, session: str = Depends(re
     db = await get_db()
     dm_id = _uid()
     now = _now()
-    await db.execute(
-        "INSERT INTO dms (id, from_id, from_name, to_id, text, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (dm_id, "human", "Human", target_id, text, 1, now),
-    )
-    await db.commit()
+    async with _write_lock:
+        await db.execute(
+            "INSERT INTO dms (id, from_id, from_name, to_id, text, priority, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (dm_id, "human", "Human", target_id, text, 1, now),
+        )
+        await db.commit()
     _notify_agent(target_id)
     _broadcast_ui("dm")
     return {
@@ -1384,8 +1404,9 @@ async def ui_set_room_status(room_name: str, request: Request, session: str = De
         raise HTTPException(400, f"status must be one of: {', '.join(VALID_ROOM_STATUSES)}")
     db = await get_db()
     room_id = await _get_room_id(db, room_name)
-    await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("UPDATE rooms SET status = ? WHERE id = ?", (new_status, room_id))
+        await db.commit()
     _broadcast_ui("room_status")
     return {"room": room_name, "status": new_status}
 
@@ -1396,8 +1417,9 @@ async def ui_archive_room(room_name: str, session: str = Depends(require_human))
     db = await get_db()
     room_id = await _get_room_id(db, room_name)
     archived_at = _now()
-    await db.execute("UPDATE rooms SET archived_at = ? WHERE id = ?", (archived_at, room_id))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("UPDATE rooms SET archived_at = ? WHERE id = ?", (archived_at, room_id))
+        await db.commit()
     _broadcast_ui("rooms")
     return {"room": room_name, "archived_at": archived_at}
 
@@ -1406,8 +1428,9 @@ async def ui_archive_room(room_name: str, session: str = Depends(require_human))
 async def ui_unarchive_room(room_name: str, session: str = Depends(require_human)):
     db = await get_db()
     room_id = await _get_room_id(db, room_name)
-    await db.execute("UPDATE rooms SET archived_at = NULL WHERE id = ?", (room_id,))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("UPDATE rooms SET archived_at = NULL WHERE id = ?", (room_id,))
+        await db.commit()
     _broadcast_ui("rooms")
     return {"room": room_name, "archived_at": None}
 
@@ -1417,11 +1440,12 @@ async def ui_delete_room(room_name: str, session: str = Depends(require_human)):
     """Permanently delete a room and everything in it (agents, messages, documents)."""
     db = await get_db()
     room_id = await _get_room_id(db, room_name)
-    await db.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
-    await db.execute("DELETE FROM documents WHERE room_id = ?", (room_id,))
-    await db.execute("DELETE FROM agents WHERE room_id = ?", (room_id,))  # FK: must precede room delete
-    await db.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("DELETE FROM messages WHERE room_id = ?", (room_id,))
+        await db.execute("DELETE FROM documents WHERE room_id = ?", (room_id,))
+        await db.execute("DELETE FROM agents WHERE room_id = ?", (room_id,))  # FK: must precede room delete
+        await db.execute("DELETE FROM rooms WHERE id = ?", (room_id,))
+        await db.commit()
     shutil.rmtree(DOCS_DIR / room_id, ignore_errors=True)
     logger.info("Room '%s' deleted by human", room_name)
     _broadcast_ui("rooms")
@@ -1435,8 +1459,9 @@ async def ui_delete_room(room_name: str, session: str = Depends(require_human)):
 async def ui_remove_agent(agent_id: str, session: str = Depends(require_human)):
     """Remove an agent from the system."""
     db = await get_db()
-    await db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+        await db.commit()
     logger.info("Agent '%s' removed by human", agent_id)
     _broadcast_ui("agents")
     return {"status": "removed", "agent_id": agent_id}
@@ -1451,11 +1476,12 @@ async def ui_create_api_token(session: str = Depends(require_human)):
     db = await get_db()
     token_id = _uid()
     token = f"chait-api-{secrets.token_hex(24)}"
-    await db.execute(
-        "INSERT INTO api_tokens (id, token, created_at) VALUES (?, ?, ?)",
-        (token_id, token, _now()),
-    )
-    await db.commit()
+    async with _write_lock:
+        await db.execute(
+            "INSERT INTO api_tokens (id, token, created_at) VALUES (?, ?, ?)",
+            (token_id, token, _now()),
+        )
+        await db.commit()
     return {"id": token_id, "token": token}
 
 
@@ -1469,8 +1495,9 @@ async def ui_list_api_tokens(session: str = Depends(require_human)):
 @app.delete("/ui/api/tokens/{token_id}")
 async def ui_revoke_api_token(token_id: str, session: str = Depends(require_human)):
     db = await get_db()
-    await db.execute("DELETE FROM api_tokens WHERE id = ?", (token_id,))
-    await db.commit()
+    async with _write_lock:
+        await db.execute("DELETE FROM api_tokens WHERE id = ?", (token_id,))
+        await db.commit()
     return {"revoked": True, "id": token_id}
 
 
