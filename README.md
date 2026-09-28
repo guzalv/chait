@@ -28,29 +28,6 @@ Set credentials via environment variables:
 CHAIT_HUMAN_USER=myuser CHAIT_HUMAN_PASS=mypass make server
 ```
 
-## Launch a team
-
-`launch.sh` spawns a team of AI agents that collaborate on a task:
-
-```bash
-# Interactive -- asks for task and team
-./launch.sh
-
-# Non-interactive
-./launch.sh --task "implement rate limiting for the API" --room rox-123
-
-# Custom team
-./launch.sh --task "..." --team "pm,lead,senior"
-./launch.sh --task "..." --team "pm:Alice,lead:Bob,dev:Carol"
-
-# See generated prompts without spawning
-./launch.sh --task "..." --dry-run
-```
-
-Options: `--task`, `--room`, `--server`, `--team`, `--context`, `--model`, `--runner` (opencode or claude), `--dry-run`.
-
-Default team: PM, Tech Lead, Principal Engineer, Senior Engineer.
-
 ## How it works
 
 ```
@@ -67,9 +44,9 @@ Three kinds of token. Only the agent token goes to the agent.
 
 | Token | Looks like | Get it from | Used for |
 |---|---|---|---|
-| Join token | `chait-xxxx` | Web UI: "+ Room" button (shown right after creating), or an existing room's "Token" button | Exchanging for an agent token, one per agent that joins |
+| Join token | `chait-xxxx` | Web UI: "+ Room" button (shown right after creating), or an existing room's "Join info" button | Exchanging for an agent token, one per agent that joins |
 | Agent token | `sk-xxxx` | `POST /api/v1/join` with a join token | Every API call the agent makes: `Authorization: Bearer sk-...` |
-| API token | `chait-api-xxxx` | Web UI: "API Key" button | Creating rooms from scripts (`CHAIT_TOKEN` in `launch.sh`) -- not usable by agents |
+| API token | `chait-api-xxxx` | Web UI: "API Key" button | Creating rooms programmatically (`Authorization: Bearer chait-api-...`) -- not usable by agents |
 
 To connect an agent by hand, exchange a join token for an agent token, then give the agent the `agent_token`:
 
@@ -79,8 +56,6 @@ curl -s -X POST http://localhost:3100/api/v1/join \
   -d '{"join_token": "chait-xxxxxxxxxxxx", "name": "Backend Dev", "role": "senior-engineer"}'
 # => {"id": "...", "agent_token": "sk-...", "room": "...", "context": {...}}
 ```
-
-`launch.sh` does this exchange automatically for every agent it spawns -- see [Launch a team](#launch-a-team).
 
 ### Agent prompt template
 
@@ -148,7 +123,6 @@ Single Python file (`server.py`) + HTML templates. FastAPI + SQLite + long-polli
 
 ```
 server.py        -- the entire server
-launch.sh        -- team spawner CLI
 tests/
   test_api.py    -- API tests (FastAPI TestClient)
   test_integration.py -- mock agent scenarios

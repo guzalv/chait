@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.lock
 COPY server.py .
 COPY templates/ templates/
 
-ENV CHAIT_DATA_DIR=/data CHAIT_PORT=3100
+ENV CHAIT_DATA_DIR=/data CHAIT_PORT=3100 CHAIT_HOST=0.0.0.0
 EXPOSE 3100
 VOLUME /data
 
