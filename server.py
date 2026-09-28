@@ -25,6 +25,7 @@ from fastapi import (
     Response,
     UploadFile,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -33,6 +34,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from pydantic import BaseModel, Field
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # ---------------------------------------------------------------------------
 # Config
@@ -218,6 +220,11 @@ async def init_db():
             await _db.execute(f"SELECT {col} FROM {tbl} LIMIT 1")
         except Exception:
             await _db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT DEFAULT {default}")
+    # Enforce one agent per (name, room_id). Legacy DBs may already hold
+    # duplicates from the old check-then-insert race, so dedupe (keep the oldest
+    # rowid) before creating the unique index or the CREATE would fail.
+    await _db.execute("DELETE FROM agents WHERE rowid NOT IN (SELECT MIN(rowid) FROM agents GROUP BY name, room_id)")
+    await _db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_name_room ON agents(name, room_id)")
     await _db.commit()
 
 
@@ -420,9 +427,55 @@ class ApiError(HTTPException):
         super().__init__(status_code=status_code, detail=detail)
 
 
-@app.exception_handler(ApiError)
-async def api_error_handler(request: Request, exc: ApiError):
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+# Maps a raw HTTP status to a documented error code for HTTPExceptions that
+# don't carry a structured ApiError detail. Keeps the public error contract
+# ({"error":{"code","message"}}) uniform across the whole app.
+_STATUS_ERROR_CODES = {
+    400: "INVALID_REQUEST",
+    401: "AUTH_REQUIRED",
+    403: "FORBIDDEN",
+    404: "NOT_FOUND",
+    409: "CONFLICT",
+    413: "TOO_LARGE",
+    429: "RATE_LIMITED",
+    503: "UNAVAILABLE",
+}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """Uniform {"error":{...}} envelope for ALL HTTPExceptions (incl. ApiError).
+
+    Redirects are the one exception: require_human raises a 303 with a Location
+    header to bounce unauthenticated humans to /login, and that must stay a real
+    redirect (no JSON body) or the entire human UI breaks.
+    """
+    headers = exc.headers or {}
+    is_redirect = 300 <= exc.status_code < 400 or any(k.lower() == "location" for k in headers)
+    if is_redirect:
+        return Response(status_code=exc.status_code, headers=exc.headers)
+    # Structured ApiError carries a dict detail with a machine-readable "code".
+    if isinstance(exc.detail, dict) and "code" in exc.detail:
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail}, headers=exc.headers)
+    # Raw HTTPException with a string detail: map status -> documented code.
+    code = _STATUS_ERROR_CODES.get(exc.status_code, "ERROR")
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": {"code": code, "message": str(exc.detail)}},
+        headers=exc.headers,
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """FastAPI request-validation failures (422) in the same envelope."""
+    errors = exc.errors()
+    first = errors[0] if errors else {}
+    loc = first.get("loc") or []
+    error: dict = {"code": "INVALID_FIELD", "message": first.get("msg", "Validation error")}
+    if loc:
+        error["field"] = ".".join(str(part) for part in loc)
+    return JSONResponse(status_code=422, content={"error": error})
 
 
 # ---------------------------------------------------------------------------
@@ -585,12 +638,28 @@ async def join_with_token(request: Request, body: JoinRequest):
         expires = (
             (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
         )
-        await db.execute(
-            "INSERT INTO agents (id, name, role, agent_token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
-        )
-        await db.commit()
-        logger.info("Agent '%s' (role=%s) joined room '%s'", name, role, room["name"])
+        try:
+            await db.execute(
+                "INSERT INTO agents (id, name, role, agent_token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
+            )
+            await db.commit()
+            logger.info("Agent '%s' (role=%s) joined room '%s'", name, role, room["name"])
+        except aiosqlite.IntegrityError:
+            # A concurrent request inserted the same (name, room_id) first (unique
+            # index). Reuse that agent so the join stays idempotent instead of 500.
+            await db.rollback()
+            existing = await db.execute_fetchall(
+                "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"])
+            )
+            agent = dict(existing[0])
+            agent_id = agent["id"]
+            agent_token = agent["agent_token"]
+            role = agent["role"]
+            if card:
+                await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent_id))
+                await db.commit()
+            logger.info("Agent '%s' re-joined room '%s' (existing, race resolved)", name, room["name"])
     _broadcast_ui("agents")
     # Include room context so agents know what they're joining
     docs = await db.execute_fetchall(
@@ -630,11 +699,18 @@ async def api_create_room(body: RoomCreateRequest, _token: str = Depends(auth_ma
         }
     room_id = _uid()
     join_token = f"chait-{secrets.token_hex(16)}"
-    await db.execute(
-        "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
-        (room_id, name, topic, join_token, _now()),
-    )
-    await db.commit()
+    try:
+        await db.execute(
+            "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
+            (room_id, name, topic, join_token, _now()),
+        )
+        await db.commit()
+    except aiosqlite.IntegrityError:
+        # Concurrent create won the race (rooms.name is UNIQUE): return the
+        # existing room instead of 500, matching the check-then-return path.
+        await db.rollback()
+        row = dict((await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,)))[0])
+        return {"id": row["id"], "name": name, "join_token": row["join_token"], "existing": True}
     logger.info("Room '%s' created (id=%s)", name, room_id)
     _broadcast_ui("rooms")
     return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
@@ -1049,7 +1125,7 @@ async def ui_create_room(request: Request, session: str = Depends(require_human)
     name = body.get("name", "")
     topic = body.get("topic", "")
     if not name:
-        raise HTTPException(400, "name required")
+        raise ApiError(400, "MISSING_FIELD", "name required", field="name")
     db = await get_db()
     existing = await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,))
     if existing:
@@ -1061,11 +1137,18 @@ async def ui_create_room(request: Request, session: str = Depends(require_human)
         }
     room_id = _uid()
     join_token = f"chait-{secrets.token_hex(16)}"
-    await db.execute(
-        "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
-        (room_id, name, topic, join_token, _now()),
-    )
-    await db.commit()
+    try:
+        await db.execute(
+            "INSERT INTO rooms (id, name, topic, status, join_token, created_at) VALUES (?, ?, ?, 'active', ?, ?)",
+            (room_id, name, topic, join_token, _now()),
+        )
+        await db.commit()
+    except aiosqlite.IntegrityError:
+        # Concurrent create won the race (rooms.name is UNIQUE): return the
+        # existing room instead of 500, matching the check-then-return path.
+        await db.rollback()
+        row = dict((await db.execute_fetchall("SELECT id, join_token FROM rooms WHERE name = ?", (name,)))[0])
+        return {"id": row["id"], "name": name, "join_token": row["join_token"], "existing": True}
     _broadcast_ui("rooms")
     return {"id": room_id, "name": name, "topic": topic, "status": "active", "join_token": join_token}
 
@@ -1168,9 +1251,9 @@ async def ui_send_message(room_name: str, request: Request, session: str = Depen
     body = await request.json()
     text = body.get("text", "")
     if not text:
-        raise HTTPException(400)
+        raise ApiError(400, "MISSING_FIELD", "text required", field="text")
     if len(text) > MAX_MESSAGE_LENGTH:
-        raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
+        raise ApiError(413, "TOO_LARGE", f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
     room_id = await _get_room_id(db, room_name)
     msg_id = _uid()
@@ -1224,9 +1307,9 @@ async def ui_send_dm(target_id: str, request: Request, session: str = Depends(re
     body = await request.json()
     text = body.get("text", "")
     if not text:
-        raise HTTPException(400)
+        raise ApiError(400, "MISSING_FIELD", "text required", field="text")
     if len(text) > MAX_MESSAGE_LENGTH:
-        raise HTTPException(413, f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
+        raise ApiError(413, "TOO_LARGE", f"Message too long ({MAX_MESSAGE_LENGTH} chars max)")
     db = await get_db()
     dm_id = _uid()
     now = _now()
