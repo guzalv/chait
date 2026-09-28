@@ -958,3 +958,73 @@ class TestWriteSerialization:
         assert all(r.status_code == 200 for r in results)
         texts = sorted(m["text"] for m in client.get("/ui/api/rooms/race/messages").json())
         assert texts == sorted(f"m{i}" for i in range(n))
+
+
+# ---------------------------------------------------------------------------
+# Monotonic timestamps (_now)
+# ---------------------------------------------------------------------------
+class TestMonotonicNow:
+    """Guards the strictly-increasing, unique timestamp source.
+
+    The `created_at > since` cursor skips rows that share a timestamp and
+    regresses on a backward wall-clock step, so _now() must never repeat or
+    go backwards. monkeypatch.setattr snapshots server._last_ts and restores
+    it at teardown so these tests don't leak state to neighbors.
+    """
+
+    def test_now_is_strictly_increasing_and_unique(self, monkeypatch):
+        monkeypatch.setattr(server, "_last_ts", server._last_ts)
+        vals = [server._now() for _ in range(1000)]
+        assert all(a < b for a, b in zip(vals, vals[1:]))  # strictly increasing
+        assert len(set(vals)) == len(vals)  # all unique
+
+    def test_now_bumps_on_same_instant(self, monkeypatch):
+        # Freeze the wall clock so datetime.now() returns a fixed value; delegate
+        # fromisoformat to the real implementation for the +1µs bump.
+        frozen = datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        class _FrozenDatetime:
+            @staticmethod
+            def now(tz=None):
+                return frozen
+
+            @staticmethod
+            def fromisoformat(s):
+                return datetime.fromisoformat(s)
+
+        monkeypatch.setattr(server, "datetime", _FrozenDatetime)
+        monkeypatch.setattr(server, "_last_ts", "")
+        first = server._now()
+        second = server._now()
+        assert second > first  # microsecond bump, not a repeat
+
+    def test_cursor_advances_without_losing_messages(self, client):
+        """Paginate limit=1, advancing `since` to the last created_at seen.
+
+        This is the documented client loop; with monotonic timestamps every
+        message gets a distinct created_at so none are skipped past.
+        """
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        h = _auth(agent["agent_token"])
+        # Baseline cursor from the same monotonic clock the server uses; every
+        # message posted after this gets a strictly greater created_at. A truthy
+        # `since` selects the forward-ASC pagination branch (empty/None returns
+        # the latest N DESC instead).
+        since = server._now()
+        n = 8
+        for i in range(n):
+            assert client.post("/api/v1/rooms/r1/messages", json={"text": f"m{i}"}, headers=h).status_code == 200
+
+        seen = []
+        while True:
+            data = client.get("/api/v1/rooms/r1/messages", params={"limit": 1, "since": since}, headers=h).json()[
+                "data"
+            ]
+            if not data:
+                break
+            seen.extend(m["text"] for m in data)
+            since = data[-1]["created_at"]
+
+        assert seen == [f"m{i}" for i in range(n)]  # every message retrieved, none lost

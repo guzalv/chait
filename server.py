@@ -230,14 +230,45 @@ async def init_db():
     # rowid) before creating the unique index or the CREATE would fail.
     await _db.execute("DELETE FROM agents WHERE rowid NOT IN (SELECT MIN(rowid) FROM agents GROUP BY name, room_id)")
     await _db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_name_room ON agents(name, room_id)")
+    # Seed the monotonic clock from persisted data so timestamps keep increasing
+    # across restarts (otherwise a fresh in-memory _last_ts could re-emit values
+    # <= existing rows and break the cursor).
+    global _last_ts
+    rows = await _db.execute_fetchall(
+        "SELECT MAX(m) AS m FROM ("
+        "SELECT MAX(created_at) AS m FROM messages "
+        "UNION ALL SELECT MAX(created_at) FROM dms "
+        "UNION ALL SELECT MAX(created_at) FROM documents "
+        "UNION ALL SELECT MAX(created_at) FROM rooms "
+        "UNION ALL SELECT MAX(created_at) FROM agents)"
+    )
+    if rows and rows[0]["m"]:
+        _last_ts = rows[0]["m"]
     await _db.commit()
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+# Monotonic timestamp source. Pagination advances a `since` cursor with a strict
+# `created_at > since` comparison (get_messages, get_dms, the unread long-poll),
+# so timestamps must be strictly increasing and unique: two rows sharing a
+# microsecond would let the cursor skip the second (silent message loss), and a
+# backward wall-clock step (NTP) would reorder/drop rows. Always emitting 6-digit
+# microseconds keeps the format fixed so lexicographic order == chronological order.
+_last_ts: str = ""
+
+
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    global _last_ts
+    ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    if ts <= _last_ts:
+        # Clock tied with or regressed behind the last value: bump 1µs past it so
+        # the result is strictly greater. Purely synchronous read-modify-write, so
+        # the GIL makes it atomic across coroutines (no lock needed).
+        ts = (datetime.fromisoformat(_last_ts) + timedelta(microseconds=1)).isoformat(timespec="microseconds")
+    _last_ts = ts
+    return ts
 
 
 def _uid() -> str:
