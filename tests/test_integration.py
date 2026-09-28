@@ -36,9 +36,10 @@ def client(tmp_path):
 
 
 def _login(client):
+    # Reads server.HUMAN_PASS dynamically: startup regenerates the default.
     r = client.post(
         "/login",
-        data={"user": "admin", "password": "changeme"},
+        data={"user": server.HUMAN_USER, "password": server.HUMAN_PASS},
         follow_redirects=False,
     )
     assert r.status_code == 303

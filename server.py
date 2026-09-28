@@ -46,6 +46,7 @@ DOCS_DIR = DATA_DIR / "documents"
 PORT = int(os.getenv("CHAIT_PORT", "3100"))
 HUMAN_USER = os.getenv("CHAIT_HUMAN_USER", "admin")
 HUMAN_PASS = os.getenv("CHAIT_HUMAN_PASS", "changeme")
+SECURE_COOKIES = os.getenv("CHAIT_SECURE_COOKIES", "false").lower() in ("1", "true", "yes")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 TOKEN_TTL_HOURS = int(os.getenv("CHAIT_TOKEN_TTL_HOURS", "24"))
 MAX_MESSAGE_LENGTH = 100_000  # 100 KB
@@ -352,15 +353,58 @@ def _parse_card(raw) -> dict:
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
+def _ensure_human_password():
+    """Refuse to run with the default/empty admin password.
+
+    Runs on app startup for every entrypoint (uvicorn, gunicorn, python
+    server.py). If CHAIT_HUMAN_PASS is unset or left at the literal default,
+    generate a strong random password for local dev and log it prominently.
+    An operator-provided password is never logged.
+    """
+    global HUMAN_PASS
+    if HUMAN_PASS and HUMAN_PASS != "changeme":
+        return
+    HUMAN_PASS = secrets.token_urlsafe(16)
+    logger.warning(
+        "No CHAIT_HUMAN_PASS set; generated a random DEV password: %s -- production MUST set CHAIT_HUMAN_PASS.",
+        HUMAN_PASS,
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    _ensure_human_password()
     yield
     if _db:
         await _db.close()
 
 
 app = FastAPI(title="chait", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def _reject_oversized_body(request: Request, call_next):
+    """Reject over-large request bodies before they are parsed/spooled.
+
+    The upload endpoints cap the body at MAX_UPLOAD_BYTES, but only after the
+    whole body has been read. A Content-Length check here fails fast so a
+    client can't push an arbitrary amount of data into RAM/temp disk first.
+    Chunked requests (no Content-Length) fall through to the endpoint caps.
+    """
+    ceiling = MAX_UPLOAD_BYTES + 1_000_000  # ~1 MB multipart overhead
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            too_big = int(cl) > ceiling
+        except ValueError:
+            too_big = False
+        if too_big:
+            return JSONResponse(
+                status_code=413,
+                content={"error": {"code": "TOO_LARGE", "message": "Request body too large"}},
+            )
+    return await call_next(request)
 
 
 # ---------------------------------------------------------------------------
@@ -882,7 +926,7 @@ async def upload_document(room_name: str, file: UploadFile = File(...), agent: d
     room_doc_dir.mkdir(parents=True, exist_ok=True)
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "File too large (50 MB max)")
+        raise ApiError(413, "TOO_LARGE", "File too large (50 MB max)")
     safe_name = Path(file.filename).name or "unnamed"
     await asyncio.to_thread((room_doc_dir / f"{doc_id}_{safe_name}").write_bytes, content)
     await db.execute(
@@ -958,7 +1002,7 @@ async def login_submit(request: Request):
         await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (tok, _now()))
         await db.commit()
         resp = RedirectResponse("/", status_code=303)
-        resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", max_age=86400 * 7)
+        resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", secure=SECURE_COOKIES, max_age=86400 * 7)
         return resp
     logger.warning(
         "Login failed for user '%s' from %s", form.get("user", ""), request.client.host if request.client else "unknown"
@@ -1161,7 +1205,7 @@ async def ui_upload_document(room_name: str, file: UploadFile = File(...), sessi
     room_doc_dir.mkdir(parents=True, exist_ok=True)
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "File too large (50 MB max)")
+        raise ApiError(413, "TOO_LARGE", "File too large (50 MB max)")
     safe_name = Path(file.filename).name or "unnamed"
     await asyncio.to_thread((room_doc_dir / f"{doc_id}_{safe_name}").write_bytes, content)
     await db.execute(
@@ -1355,8 +1399,5 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    if HUMAN_PASS == "changeme":
-        HUMAN_PASS = secrets.token_urlsafe(16)
-        logger.warning("No CHAIT_HUMAN_PASS set. Generated: %s", HUMAN_PASS)
     host = os.getenv("CHAIT_HOST", "0.0.0.0")
     uvicorn.run(app, host=host, port=PORT, log_level="info")
