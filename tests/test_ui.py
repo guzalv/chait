@@ -371,6 +371,31 @@ class TestRoomInteraction:
         assert "UI test topic" in topic
 
 
+# ── Join info modal ───────────────────────────────────────────────────────
+
+
+class TestJoinInfo:
+    def test_join_info_shows_token_and_prompt(self, driver, server_url, logged_in, test_data):
+        # Reveal join token + agent prompt from an existing room at any time,
+        # not just at creation.
+        driver.get(server_url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
+        for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
+            if test_data["room"] in item.text:
+                item.click()
+                break
+        WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.ID, "room-title")))
+        driver.find_element(By.XPATH, "//button[contains(text(),'Join info')]").click()
+        WebDriverWait(driver, 10).until(
+            lambda d: d.find_element(By.ID, "token-modal").value_of_css_property("display") != "none"
+        )
+        wait(driver, lambda d: d.find_element(By.ID, "token-display").text.startswith("chait-"))
+        assert "chait-" in driver.find_element(By.ID, "token-display").text
+        prompt = driver.find_element(By.ID, "token-prompt").text
+        assert "/api/v1/instructions" in prompt
+        assert test_data["room"] in prompt
+
+
 # ── Agent cards ──────────────────────────────────────────────────────────
 
 
