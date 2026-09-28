@@ -112,12 +112,12 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   <div id="no-room">Select a room or create one</div>
   <div id="room-view" style="display:none;flex:1;flex-direction:column">
     <div id="room-header">
-      <span><button class="mobile-back" onclick="showSidebar()">&larr;</button><span id="room-title"></span> <select id="room-status-select" class="status-select" onchange="changeRoomStatus(this.value)"></select></span>
+      <span><button class="mobile-back" onclick="showSidebar()">&larr;</button><span id="room-title"></span> <select id="room-status-select" class="status-select" aria-label="Room status" onchange="changeRoomStatus(this.value)"></select></span>
       <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="openRoomDMs()" title="See all DMs between room members">Room DMs</button> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="archiveRoom()" title="Hide from the room list without deleting it">Archive</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="deleteRoom(currentRoom)" title="Permanently delete this room">Delete</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
     </div>
     <div id="messages"></div>
     <div id="input-area">
-      <textarea id="msg-input" rows="2" placeholder="Message as Human (god mode)..."></textarea>
+      <textarea id="msg-input" rows="2" aria-label="Message" placeholder="Message as Human (god mode)..."></textarea>
       <div style="display:flex;flex-direction:column;gap:.3rem">
         <button class="btn" onclick="sendMessage()">Send</button>
         <label class="btn btn-sm" style="text-align:center;cursor:pointer">Upload<input type="file" id="file-input" style="display:none" onchange="uploadFile()"></label>
@@ -135,8 +135,8 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 <div id="new-room-modal" class="modal">
   <div class="modal-box">
     <h3>New Room</h3>
-    <input id="new-room-name" placeholder="Room name (e.g. rox-12345)">
-    <textarea id="new-room-topic" rows="4" placeholder="Task description / context for agents (optional)"></textarea>
+    <input id="new-room-name" aria-label="Room name" placeholder="Room name (e.g. rox-12345)">
+    <textarea id="new-room-topic" rows="4" aria-label="Task description" placeholder="Task description / context for agents (optional)"></textarea>
     <div style="margin-bottom:.5rem">
       <label style="color:#94a3b8;font-size:.7rem;display:block;margin-bottom:.25rem">Attach context documents (optional)</label>
       <input type="file" id="new-room-files" multiple style="font-size:.7rem;color:#94a3b8">
@@ -149,6 +149,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
       <div class="token-display" id="new-room-prompt" onclick="navigator.clipboard.writeText(this.textContent)"></div>
       <div style="color:#64748b;font-size:.65rem">Click to copy</div>
     </div>
+    <div id="new-room-error" style="display:none;color:#ef4444;font-size:.75rem;margin-bottom:.5rem"></div>
     <div class="btns">
       <button class="btn btn-sm" style="background:#475569" onclick="closeNewRoom()">Close</button>
       <button class="btn btn-sm" id="create-room-btn" onclick="createRoom()">Create</button>
@@ -169,7 +170,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   <div class="modal-box">
     <h3>DM with <span id="dm-target-name"></span></h3>
     <div id="dm-messages"></div>
-    <textarea id="dm-input" rows="2" placeholder="Private message..."></textarea>
+    <textarea id="dm-input" rows="2" aria-label="Direct message" placeholder="Private message..."></textarea>
     <div class="btns">
       <button class="btn btn-sm" style="background:#475569" onclick="closeDM()">Close</button>
       <button class="btn btn-sm" onclick="sendDM()">Send DM</button>
@@ -216,8 +217,8 @@ async function api(p,o){
     const r=await fetch(p,o);
     if(r.status===303||r.redirected){location='/login';return null}
     if(!r.ok){console.error(`API ${r.status}: ${p}`);return null}
-    updateStatus('ok');return r.json();
-  }catch(e){console.error('Network error:',p,e);updateStatus('error');return null}
+    return r.json();
+  }catch(e){console.error('Network error:',p,e);return null}
 }
 function updateStatus(s){
   const el=document.getElementById('conn-status');
@@ -233,7 +234,13 @@ function updateStatus(s){
 function connectEvents(){
   const es=new EventSource('/ui/api/events');
   es.onopen=()=>updateStatus('ok');
-  es.onerror=()=>updateStatus('error');
+  es.onerror=()=>{
+    updateStatus('error');
+    // CLOSED = the stream won't reconnect (e.g. session expired and the
+    // redirect broke the event-stream). Send the user to login. CONNECTING is
+    // a transient drop EventSource retries natively — leave it alone.
+    if(es.readyState===EventSource.CLOSED)location='/login';
+  };
   es.onmessage=()=>{
     updateStatus('ok');
     loadRooms();
@@ -258,7 +265,7 @@ async function loadRooms(){
     const sc='status-'+r.status;
     const hasUnread=activity&&activity[r.name]&&(!lastRead[r.name]||activity[r.name]>lastRead[r.name]);
     const dot=hasUnread?'<span class="unread-dot"></span>':'';
-    return `<div class="room-item ${currentRoom===r.name?'active':''}" data-status="${esc(r.status)}" onclick="selectRoom(${jsattr(r.name)})">
+    return `<div class="room-item ${currentRoom===r.name?'active':''}" data-status="${esc(r.status)}" role="button" tabindex="0" onclick="selectRoom(${jsattr(r.name)})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectRoom(${jsattr(r.name)})}">
       <span>${esc(r.name)}${dot}</span><span class="room-status ${sc}">${esc(r.status)}</span></div>`
   }).join('');
   // ponytail: same stale-element-race guard as loadRoomDetails (5e5729f) —
@@ -284,7 +291,10 @@ async function selectRoom(name, pushHistory=true){
   document.getElementById('room-title').textContent='#'+name;
   if(isMobile())showMessages();
   if(pushHistory)history.pushState({room:name},'','#'+encodeURIComponent(name));
-  const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/messages`);
+  const msgs=await api(`/ui/api/rooms/${encodeURIComponent(name)}/messages`);
+  // Fast room switch: a late response for a now-unselected room must not render
+  // or poison lastTs for the room the user actually has open.
+  if(currentRoom!==name)return;
   if(msgs===null){
     // Room might not exist or server error — go back to sidebar
     currentRoom=null;sessionStorage.removeItem('chait_room');
@@ -301,16 +311,20 @@ async function selectRoom(name, pushHistory=true){
 
 // --- Messages (plan 25: human styling, plan 28c: empty state) ---
 async function loadMessages(){
-  const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/messages`);if(!msgs)return;
+  const room=currentRoom;
+  const msgs=await api(`/ui/api/rooms/${encodeURIComponent(room)}/messages`);if(!msgs)return;
+  if(currentRoom!==room)return;  // switched rooms mid-fetch; drop stale result
   renderMessages(msgs);
-  if(msgs.length>0){lastTs=msgs[msgs.length-1].created_at;markRead(currentRoom,lastTs)}
+  if(msgs.length>0){lastTs=msgs[msgs.length-1].created_at;markRead(room,lastTs)}
 }
 async function pollMessages(){
-  if(!currentRoom)return;
+  const room=currentRoom;
+  if(!room)return;
   if(!lastTs){await loadMessages();return;}
-  const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/messages?since=${encodeURIComponent(lastTs)}`);
+  const msgs=await api(`/ui/api/rooms/${encodeURIComponent(room)}/messages?since=${encodeURIComponent(lastTs)}`);
+  if(currentRoom!==room)return;  // switched rooms mid-fetch; drop stale result
   if(!msgs||!msgs.length)return;
-  appendMessages(msgs);lastTs=msgs[msgs.length-1].created_at;markRead(currentRoom,lastTs);loadRoomDetails();
+  appendMessages(msgs);lastTs=msgs[msgs.length-1].created_at;markRead(room,lastTs);loadRoomDetails();
 }
 function renderMessages(msgs){
   const el=document.getElementById('messages');
@@ -493,22 +507,34 @@ async function loadRoomDMs(){
 }
 
 // --- Room/token modals ---
-function openNewRoom(){document.getElementById('new-room-modal').style.display='flex';document.getElementById('new-room-name').focus();document.getElementById('new-room-result').style.display='none';document.getElementById('create-room-btn').style.display='';document.getElementById('new-room-files').value=''}
+function openNewRoom(){document.getElementById('new-room-modal').style.display='flex';document.getElementById('new-room-name').focus();document.getElementById('new-room-result').style.display='none';document.getElementById('new-room-error').style.display='none';document.getElementById('create-room-btn').style.display='';document.getElementById('new-room-files').value=''}
 function closeNewRoom(){document.getElementById('new-room-modal').style.display='none'}
 async function createRoom(){
   const name=document.getElementById('new-room-name').value.trim();
   const topic=document.getElementById('new-room-topic').value.trim();
   if(!name)return;
   const btn=document.getElementById('create-room-btn');btn.textContent='Creating...';btn.disabled=true;
-  const r=await fetch('/ui/api/rooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,topic})});
-  const data=await r.json();
-  const files=document.getElementById('new-room-files').files;
-  for(let i=0;i<files.length;i++){const fd=new FormData();fd.append('file',files[i]);await fetch(`/ui/api/rooms/${encodeURIComponent(name)}/documents`,{method:'POST',body:fd})}
-  document.getElementById('new-room-token').textContent=data.join_token;
-  document.getElementById('new-room-prompt').textContent=`Read the instructions at ${location.origin}/api/v1/instructions and join the room to discuss about ${name} using join token ${data.join_token}.`;
-  document.getElementById('new-room-result').style.display='block';
-  btn.style.display='none';
-  loadRooms();
+  try{
+    // Route through api(): handles 303→/login on session expiry and returns
+    // null on failure, instead of raw fetch+r.json() which throws on an HTML
+    // redirect body and leaves the button stuck on "Creating...".
+    const data=await api('/ui/api/rooms',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,topic})});
+    if(!data){
+      const err=document.getElementById('new-room-error');
+      err.textContent='Failed to create room \u2014 please try again.';err.style.display='block';
+      return;
+    }
+    const files=document.getElementById('new-room-files').files;
+    for(let i=0;i<files.length;i++){const fd=new FormData();fd.append('file',files[i]);await fetch(`/ui/api/rooms/${encodeURIComponent(name)}/documents`,{method:'POST',body:fd})}
+    document.getElementById('new-room-token').textContent=data.join_token;
+    document.getElementById('new-room-prompt').textContent=`Read the instructions at ${location.origin}/api/v1/instructions and join the room to discuss about ${name} using join token ${data.join_token}.`;
+    document.getElementById('new-room-result').style.display='block';
+    btn.style.display='none';
+    loadRooms();
+  }finally{
+    // Never leave the button stuck disabled/"Creating..." (hidden on success).
+    btn.disabled=false;btn.textContent='Create';
+  }
 }
 async function showJoinToken(){
   if(!currentRoom)return;
