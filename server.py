@@ -1602,7 +1602,7 @@ async def ui_remove_agent(agent_id: str, session: str = Depends(require_human)):
 # ---------------------------------------------------------------------------
 @app.post("/ui/api/tokens")
 async def ui_create_api_token(session: str = Depends(require_human)):
-    """Generate a new API token for CLI use (e.g. launch.sh)."""
+    """Generate a new API token for programmatic/CLI room creation."""
     db = await get_db()
     token_id = _uid()
     # Left plaintext by design: ui_list_api_tokens lists these in full, so the

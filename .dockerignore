@@ -9,4 +9,3 @@ docs/
 *.log
 *.md
 Makefile
-launch.sh
