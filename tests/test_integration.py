@@ -605,8 +605,9 @@ def test_human_sees_room_member_dms(client):
     client.post(f"/api/v1/dm/{b['id']}", json={"text": "private to Bob"}, headers=_auth(a["agent_token"]))
     # Human's own DM to Bob — should NOT appear (human is not in agents table)
     client.post(f"/ui/api/dm/{b['id']}", json={"text": "human to Bob"})
-    # Cross-room DM must not leak
-    client.post(f"/api/v1/dm/{outsider['id']}", json={"text": "cross-room"}, headers=_auth(a["agent_token"]))
+    # Cross-room DM is now rejected (agents may only DM their own room)
+    cross = client.post(f"/api/v1/dm/{outsider['id']}", json={"text": "cross-room"}, headers=_auth(a["agent_token"]))
+    assert cross.status_code == 404
 
     dms = client.get("/ui/api/rooms/dm-room/dms").json()
     assert len(dms) == 1
