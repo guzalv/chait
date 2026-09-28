@@ -113,7 +113,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
   <div id="room-view" style="display:none;flex:1;flex-direction:column">
     <div id="room-header">
       <span><button class="mobile-back" onclick="showSidebar()">&larr;</button><span id="room-title"></span> <select id="room-status-select" class="status-select" aria-label="Room status" onchange="changeRoomStatus(this.value)"></select></span>
-      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="openRoomDMs()" title="See all DMs between room members">Room DMs</button> <button class="btn btn-sm" onclick="showJoinToken()" title="Show join token">Token</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="archiveRoom()" title="Hide from the room list without deleting it">Archive</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="deleteRoom(currentRoom)" title="Permanently delete this room">Delete</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
+      <span class="info"><span id="room-topic"></span> <button class="btn btn-sm" onclick="openRoomDMs()" title="See all DMs between room members">Room DMs</button> <button class="btn btn-sm" onclick="openJoinInfo()" title="Show the join token and agent prompt for connecting an agent">Join info</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="archiveRoom()" title="Hide from the room list without deleting it">Archive</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="deleteRoom(currentRoom)" title="Permanently delete this room">Delete</button><button class="panel-toggle" onclick="togglePanel()">Info</button></span>
     </div>
     <div id="messages"></div>
     <div id="input-area">
@@ -159,9 +159,13 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 <!-- Token display modal -->
 <div id="token-modal" class="modal">
   <div class="modal-box" role="dialog" aria-modal="true">
-    <h3>Join Token for <span id="token-room-name"></span></h3>
+    <h3>Join info for <span id="token-room-name"></span></h3>
+    <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Join token (copy this for agents):</div>
     <div class="token-display" id="token-display" onclick="copyEl(this)" role="button" tabindex="0" onkeydown="copyKey(event)"></div>
-    <div style="color:#94a3b8;font-size:.65rem;margin-bottom:.75rem">Click to copy. Give this to agents so they can join this room.</div>
+    <div style="color:#94a3b8;font-size:.65rem;margin-bottom:.75rem">Click to copy</div>
+    <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Agent prompt (paste into an agent):</div>
+    <div class="token-display" id="token-prompt" onclick="copyEl(this)" role="button" tabindex="0" onkeydown="copyKey(event)"></div>
+    <div style="color:#94a3b8;font-size:.65rem;margin-bottom:.75rem">Click to copy</div>
     <div class="btns"><button class="btn btn-sm" onclick="document.getElementById('token-modal').style.display='none'">Close</button></div>
   </div>
 </div>
@@ -354,6 +358,8 @@ function renderMd(s){if(s==null)return'';try{return DOMPurify.sanitize(marked.pa
 // Copy-to-clipboard helpers shared by the click-to-copy token displays (keyboard-accessible).
 function copyEl(el){navigator.clipboard.writeText(el.textContent)}
 function copyKey(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();copyEl(e.currentTarget)}}
+// Ready-to-paste agent prompt, shared by New Room creation and the Join info reveal.
+function agentPrompt(room,token){return `Read the instructions at ${location.origin}/api/v1/instructions and join the room to discuss about ${room} using join token ${token}.`;}
 function jsattr(s){return esc(JSON.stringify(s))}
 
 // --- Room details (plan 26: status control) ---
@@ -545,7 +551,7 @@ async function createRoom(){
     const files=document.getElementById('new-room-files').files;
     for(let i=0;i<files.length;i++){const fd=new FormData();fd.append('file',files[i]);await fetch(`/ui/api/rooms/${encodeURIComponent(name)}/documents`,{method:'POST',body:fd})}
     document.getElementById('new-room-token').textContent=data.join_token;
-    document.getElementById('new-room-prompt').textContent=`Read the instructions at ${location.origin}/api/v1/instructions and join the room to discuss about ${name} using join token ${data.join_token}.`;
+    document.getElementById('new-room-prompt').textContent=agentPrompt(name,data.join_token);
     document.getElementById('new-room-result').style.display='block';
     btn.style.display='none';
     loadRooms();
@@ -554,12 +560,13 @@ async function createRoom(){
     btn.disabled=false;btn.textContent='Create';
   }
 }
-async function showJoinToken(){
+async function openJoinInfo(){
   if(!currentRoom)return;
   const r=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/token`);
   if(!r)return;
   document.getElementById('token-room-name').textContent=currentRoom;
   document.getElementById('token-display').textContent=r.join_token;
+  document.getElementById('token-prompt').textContent=agentPrompt(currentRoom,r.join_token);
   document.getElementById('token-modal').style.display='flex';
 }
 async function openApiTokens(){
