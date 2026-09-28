@@ -128,6 +128,24 @@ class TestAgentCards:
         room_data = client.get("/api/v1/rooms/r1", headers=_auth(agent["agent_token"])).json()
         assert room_data["members"][0]["card"] == card
 
+    def test_update_card_rejects_non_dict_body(self, client):
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        r = client.put("/api/v1/me/card", json=[1, 2, 3], headers=_auth(agent["agent_token"]))
+        assert r.status_code == 422
+
+    def test_update_card_rejects_malformed_json(self, client):
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        r = client.put(
+            "/api/v1/me/card",
+            content="{not valid json",
+            headers={**_auth(agent["agent_token"]), "Content-Type": "application/json"},
+        )
+        assert r.status_code == 422
+
 
 # ---------------------------------------------------------------------------
 # Me
@@ -342,6 +360,15 @@ class TestMessages:
         )
         assert r.status_code == 404
 
+    def test_get_messages_negative_limit_returns_422(self, client):
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        h = _auth(agent["agent_token"])
+        # limit=-1 would make SQLite fetch unbounded; must be rejected.
+        assert client.get("/api/v1/rooms/r1/messages", params={"limit": -1}, headers=h).status_code == 422
+        assert client.get("/api/v1/rooms/r1/messages", params={"limit": 0}, headers=h).status_code == 422
+
 
 # ---------------------------------------------------------------------------
 # DMs
@@ -382,6 +409,36 @@ class TestDMs:
         resp = client.get(f"/api/v1/dm/{a2['id']}", params={"since": ts}, headers=_auth(a1["agent_token"])).json()
         assert resp["count"] == 1
         assert resp["data"][0]["text"] == "new"
+
+    def test_get_dms_negative_limit_returns_422(self, client):
+        _login(client)
+        room = _create_room(client, "r1")
+        a1 = _join(client, room["join_token"], name="a1")
+        a2 = _join(client, room["join_token"], name="a2")
+        h = _auth(a1["agent_token"])
+        assert client.get(f"/api/v1/dm/{a2['id']}", params={"limit": -1}, headers=h).status_code == 422
+        assert client.get(f"/api/v1/dm/{a2['id']}", params={"limit": 0}, headers=h).status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting
+# ---------------------------------------------------------------------------
+class TestRateLimit:
+    def test_message_rate_limit_returns_429(self, client):
+        # _rate_buckets is module-level global state shared across tests; clear
+        # it so this test deterministically hits the 30/min message cap.
+        server._rate_buckets.clear()
+        _login(client)
+        room = _create_room(client, "r1")
+        agent = _join(client, room["join_token"])
+        h = _auth(agent["agent_token"])
+        codes = [client.post("/api/v1/rooms/r1/messages", json={"text": "x"}, headers=h).status_code for _ in range(35)]
+        assert 429 in codes
+        limited = client.post("/api/v1/rooms/r1/messages", json={"text": "x"}, headers=h)
+        assert limited.status_code == 429
+        assert limited.json()["error"]["code"] == "RATE_LIMITED"
+        # Leave global state clean for neighboring tests.
+        server._rate_buckets.clear()
 
 
 # ---------------------------------------------------------------------------
