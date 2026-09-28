@@ -242,16 +242,23 @@ class TestDashboard:
     def test_sidebar_shows_rooms(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
-        items = driver.find_elements(By.CSS_SELECTOR, ".room-item")
-        names = [i.text.split("\n")[0] for i in items]
-        assert test_data["room"] in " ".join(names)
+        # Atomic read: the SSE stream re-renders .room-item on any event, so
+        # querying then reading .text in a separate call can hit stale handles.
+        names = driver.execute_script(
+            "return Array.from(document.querySelectorAll('.room-item')).map(i => i.innerText.split('\\n')[0]).join(' ')"
+        )
+        assert test_data["room"] in names
 
     def test_rooms_have_status_badges(self, driver, server_url, logged_in, test_data):
         driver.get(server_url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-status")))
         badges = driver.find_elements(By.CSS_SELECTOR, ".room-status")
         assert len(badges) > 0
-        classes = " ".join(b.get_attribute("class") for b in badges)
+        # Atomic read: an SSE re-render between find_elements and the class read
+        # invalidates the badge handles (StaleElementReferenceException).
+        classes = driver.execute_script(
+            "return Array.from(document.querySelectorAll('.room-status')).map(b => b.className).join(' ')"
+        )
         assert "status-active" in classes
 
     def test_right_panel_sections(self, driver, server_url, logged_in):
@@ -324,14 +331,19 @@ class TestAgentCards:
         self._select_room(driver, server_url, test_data)
         cards = driver.find_elements(By.CSS_SELECTOR, ".agent-card")
         assert len(cards) >= 1
-        card_text = cards[0].text
+        # Atomic read: .agent-card is re-rendered by the SSE stream, so reading
+        # .text from a previously-captured handle can raise stale-element.
+        card_text = driver.execute_script("return document.querySelector('.agent-card').innerText")
         assert "TestBot" in card_text
         assert "tester" in card_text
 
     def test_agent_card_shows_skills(self, driver, server_url, logged_in, test_data):
         self._select_room(driver, server_url, test_data)
-        cards = driver.find_elements(By.CSS_SELECTOR, ".agent-card")
-        skill_text = " ".join(c.text for c in cards)
+        # Atomic read: .agent-card is re-rendered by the SSE stream between the
+        # query and the .text read, invalidating the captured handles.
+        skill_text = driver.execute_script(
+            "return Array.from(document.querySelectorAll('.agent-card')).map(c => c.innerText).join(' ')"
+        )
         assert "selenium" in skill_text or "pytest" in skill_text
 
     def test_agent_card_has_dm_button(self, driver, server_url, logged_in, test_data):
@@ -358,8 +370,11 @@ class TestHumanMessaging:
         textarea.send_keys("Button send test")
         driver.find_element(By.CSS_SELECTOR, "#input-area .btn").click()
         time.sleep(1)
-        msgs = driver.find_elements(By.CSS_SELECTOR, "#messages .msg")
-        assert any("Button send test" in m.text for m in msgs)
+        # Atomic read: SSE re-renders #messages .msg, so collect text in one call.
+        msgs_text = driver.execute_script(
+            "return Array.from(document.querySelectorAll('#messages .msg')).map(m => m.innerText)"
+        )
+        assert any("Button send test" in t for t in msgs_text)
 
     def test_send_via_enter(self, driver, server_url, logged_in, test_data):
         self._select_room(driver, server_url, test_data)
@@ -367,18 +382,24 @@ class TestHumanMessaging:
         textarea.send_keys("Enter send test")
         textarea.send_keys(Keys.RETURN)
         time.sleep(1)
-        msgs = driver.find_elements(By.CSS_SELECTOR, "#messages .msg")
-        assert any("Enter send test" in m.text for m in msgs)
+        # Atomic read: SSE re-renders #messages .msg, so collect text in one call.
+        msgs_text = driver.execute_script(
+            "return Array.from(document.querySelectorAll('#messages .msg')).map(m => m.innerText)"
+        )
+        assert any("Enter send test" in t for t in msgs_text)
 
     def test_sent_message_has_human_author_and_priority(self, driver, server_url, logged_in, test_data):
         self._select_room(driver, server_url, test_data)
         # Look for any human message already sent
         time.sleep(1)
-        msgs = driver.find_elements(By.CSS_SELECTOR, "#messages .msg")
-        human_msgs = [m for m in msgs if "Human" in m.text and "[god]" in m.text]
+        # Atomic read: SSE re-renders #messages .msg, so collect text in one call.
+        msgs_text = driver.execute_script(
+            "return Array.from(document.querySelectorAll('#messages .msg')).map(m => m.innerText)"
+        )
+        human_msgs = [t for t in msgs_text if "Human" in t and "[god]" in t]
         assert len(human_msgs) > 0
         # At least one should have priority badge
-        priority_msgs = [m for m in msgs if "PRIORITY" in m.text]
+        priority_msgs = [t for t in msgs_text if "PRIORITY" in t]
         assert len(priority_msgs) > 0
 
 
@@ -605,8 +626,12 @@ class TestMobile:
         """Verify room onclick attributes contain valid JS (no quote truncation)."""
         mobile_driver.get(server_url)
         WebDriverWait(mobile_driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
-        for item in mobile_driver.find_elements(By.CSS_SELECTOR, ".room-item"):
-            onclick = item.get_attribute("onclick")
+        # Atomic read: .room-item is re-rendered by SSE, so grab every onclick
+        # attribute in one call instead of reading from per-item handles.
+        onclicks = mobile_driver.execute_script(
+            "return Array.from(document.querySelectorAll('.room-item')).map(i => i.getAttribute('onclick'))"
+        )
+        for onclick in onclicks:
             assert onclick is not None, "onclick missing"
             assert "selectRoom(" in onclick, f"onclick truncated: {onclick!r}"
             assert onclick.endswith(")"), f"onclick not complete: {onclick!r}"
@@ -680,8 +705,11 @@ class TestRoomCreation:
                 btn.click()
                 break
         time.sleep(0.5)
-        items = driver.find_elements(By.CSS_SELECTOR, ".room-item")
-        assert any("ui-create-" in i.text for i in items)
+        # Atomic read: SSE re-renders .room-item, so collect text in one call.
+        items_text = driver.execute_script(
+            "return Array.from(document.querySelectorAll('.room-item')).map(i => i.innerText)"
+        )
+        assert any("ui-create-" in t for t in items_text)
 
 
 # ── Connection status ────────────────────────────────────────────────────
@@ -720,8 +748,11 @@ class TestRoomStatusControl:
         self._select_room(driver, server_url, test_data)
         Select(driver.find_element(By.ID, "room-status-select")).select_by_value("waiting-for-input")
         time.sleep(2)
-        items = driver.find_elements(By.CSS_SELECTOR, ".room-item")
-        assert any("waiting" in i.text.lower() for i in items if test_data["room"] in i.text)
+        # Atomic read: SSE re-renders .room-item, so collect text in one call.
+        items_text = driver.execute_script(
+            "return Array.from(document.querySelectorAll('.room-item')).map(i => i.innerText)"
+        )
+        assert any("waiting" in t.lower() for t in items_text if test_data["room"] in t)
         # Reset
         Select(driver.find_element(By.ID, "room-status-select")).select_by_value("active")
         time.sleep(1)
@@ -777,7 +808,11 @@ class TestXSSPrevention:
                 item.click()
                 break
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".agent-card")))
-        card_html = "".join(c.get_attribute("innerHTML") for c in driver.find_elements(By.CSS_SELECTOR, ".agent-card"))
+        # Atomic read: .agent-card is re-rendered by the SSE stream, so read all
+        # innerHTML in one call to avoid stale-element on the captured handles.
+        card_html = driver.execute_script(
+            "return Array.from(document.querySelectorAll('.agent-card')).map(c => c.innerHTML).join('')"
+        )
         assert "<img" not in card_html.lower(), f"XSS not escaped: {card_html[:200]}"
 
     def test_xss_in_message_escaped(self, driver, server_url, logged_in, test_data):
@@ -866,7 +901,12 @@ class TestRoomDMs:
 
     def test_room_dms_button_exists(self, driver, server_url, logged_in, room_dms_data):
         self._select_room(driver, server_url, room_dms_data)
-        btns = [b for b in driver.find_elements(By.TAG_NAME, "button") if b.text.strip() == "Room DMs"]
+        # Atomic read: the button set includes .dm-btn inside .agent-card, which
+        # the SSE stream re-renders — read all button text in one call.
+        btn_texts = driver.execute_script(
+            "return Array.from(document.querySelectorAll('button')).map(b => b.innerText.trim())"
+        )
+        btns = [t for t in btn_texts if t == "Room DMs"]
         assert len(btns) == 1
 
     def test_room_dms_modal_opens_with_room_name(self, driver, server_url, logged_in, room_dms_data):
