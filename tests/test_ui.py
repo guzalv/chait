@@ -719,6 +719,9 @@ class TestConnectionStatus:
     def test_live_indicator_visible(self, driver, server_url, logged_in):
         driver.get(server_url)
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "conn-status")))
+        # The badge now starts neutral ("Connecting") and flips to "Live" once the
+        # SSE stream opens, so wait for that instead of asserting immediately.
+        WebDriverWait(driver, 10).until(EC.text_to_be_present_in_element((By.ID, "conn-status"), "Live"))
         assert driver.find_element(By.ID, "conn-status").text == "Live"
 
 

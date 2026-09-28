@@ -25,7 +25,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 .msg{margin-bottom:.75rem}
 .msg .meta{font-size:.7rem;color:#94a3b8;margin-bottom:2px}
 .msg .meta .name{color:#38bdf8;font-weight:600}
-.msg .meta .role{color:#64748b}
+.msg .meta .role{color:#94a3b8}
 .msg .meta .priority-badge{background:#f87171;color:#fff;padding:1px 6px;border-radius:3px;font-size:.6rem;margin-left:4px}
 .msg .text{font-size:.85rem;line-height:1.5;overflow-wrap:break-word}
 .msg .text p{margin:0 0 .4em}
@@ -59,12 +59,12 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 #right-panel h3{color:#94a3b8;font-size:.7rem;text-transform:uppercase;margin-bottom:.25rem}
 .agent-card{background:#0f172a;border:1px solid #334155;border-radius:4px;padding:.5rem;margin-bottom:.4rem}
 .agent-card .agent-name{color:#38bdf8;font-weight:600;font-size:.8rem}
-.agent-card .agent-role{color:#64748b;font-size:.7rem}
+.agent-card .agent-role{color:#94a3b8;font-size:.7rem}
 .agent-card .agent-skills{color:#94a3b8;font-size:.65rem;margin-top:.25rem}
 .agent-card .dm-btn{margin-top:.3rem}
 .doc-item{padding:.2rem 0}
 .doc-item a{color:#38bdf8;text-decoration:none;font-size:.75rem}
-#no-room{display:flex;align-items:center;justify-content:center;flex:1;color:#64748b;font-size:1rem}
+#no-room{display:flex;align-items:center;justify-content:center;flex:1;color:#94a3b8;font-size:1rem}
 .modal{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.7);z-index:100;align-items:center;justify-content:center}
 .modal .modal-box{background:#1e293b;padding:1.5rem;border-radius:8px;width:420px;max-height:80vh;max-height:80dvh;overflow-y:auto}
 .modal h3{color:#38bdf8;margin-bottom:.75rem}
@@ -75,7 +75,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 #dm-messages,#room-dms-messages{max-height:300px;overflow-y:auto;margin-bottom:.5rem;border:1px solid #334155;border-radius:4px;padding:.5rem;background:#0f172a}
 #dm-messages .dm-msg,#room-dms-messages .dm-msg{margin-bottom:.4rem;font-size:.8rem}
 #dm-messages .dm-msg .dm-from,#room-dms-messages .dm-msg .dm-from{font-weight:600;color:#38bdf8}
-#dm-messages .dm-msg .dm-time,#room-dms-messages .dm-msg .dm-time{color:#64748b;font-size:.65rem;margin-left:.5rem}
+#dm-messages .dm-msg .dm-time,#room-dms-messages .dm-msg .dm-time{color:#94a3b8;font-size:.65rem;margin-left:.5rem}
 .status-select{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:4px;padding:2px 4px;font-size:.7rem;cursor:pointer}
 .mobile-back{display:none;background:none;border:none;color:#38bdf8;font-size:1.1rem;cursor:pointer;padding:.25rem .5rem;margin-right:.25rem}
 .panel-toggle{display:none;background:none;border:1px solid #334155;color:#94a3b8;font-size:.75rem;cursor:pointer;padding:.25rem .5rem;border-radius:4px;margin-left:.5rem}
@@ -103,7 +103,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
 </head><body>
 <div id="sidebar">
-  <h1>chait <span id="conn-status" class="conn-status" style="background:#22c55e">Live</span>
+  <h1>chait <span id="conn-status" class="conn-status" style="background:#f59e0b">Connecting</span>
     <span><button class="btn btn-sm" onclick="openNewRoom()">+ Room</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openArchivedRooms()">Archived</button> <button class="btn btn-sm" style="background:#475569;color:#e2e8f0" onclick="openApiTokens()">API Key</button> <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="doLogout()">Logout</button></span>
   </h1>
   <div id="rooms-list"></div>
@@ -133,7 +133,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 <div id="panel-overlay" onclick="togglePanel()"></div>
 <!-- New Room modal -->
 <div id="new-room-modal" class="modal">
-  <div class="modal-box">
+  <div class="modal-box" role="dialog" aria-modal="true">
     <h3>New Room</h3>
     <input id="new-room-name" aria-label="Room name" placeholder="Room name (e.g. rox-12345)">
     <textarea id="new-room-topic" rows="4" aria-label="Task description" placeholder="Task description / context for agents (optional)"></textarea>
@@ -143,11 +143,11 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
     </div>
     <div id="new-room-result" style="display:none">
       <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Join token (copy this for agents):</div>
-      <div class="token-display" id="new-room-token" onclick="navigator.clipboard.writeText(this.textContent)"></div>
-      <div style="color:#64748b;font-size:.65rem;margin-bottom:.75rem">Click token to copy</div>
+      <div class="token-display" id="new-room-token" onclick="copyEl(this)" role="button" tabindex="0" onkeydown="copyKey(event)"></div>
+      <div style="color:#94a3b8;font-size:.65rem;margin-bottom:.75rem">Click token to copy</div>
       <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.25rem">Agent prompt (paste into an agent):</div>
-      <div class="token-display" id="new-room-prompt" onclick="navigator.clipboard.writeText(this.textContent)"></div>
-      <div style="color:#64748b;font-size:.65rem">Click to copy</div>
+      <div class="token-display" id="new-room-prompt" onclick="copyEl(this)" role="button" tabindex="0" onkeydown="copyKey(event)"></div>
+      <div style="color:#94a3b8;font-size:.65rem">Click to copy</div>
     </div>
     <div id="new-room-error" style="display:none;color:#ef4444;font-size:.75rem;margin-bottom:.5rem"></div>
     <div class="btns">
@@ -158,16 +158,16 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 </div>
 <!-- Token display modal -->
 <div id="token-modal" class="modal">
-  <div class="modal-box">
+  <div class="modal-box" role="dialog" aria-modal="true">
     <h3>Join Token for <span id="token-room-name"></span></h3>
-    <div class="token-display" id="token-display" onclick="navigator.clipboard.writeText(this.textContent)"></div>
-    <div style="color:#64748b;font-size:.65rem;margin-bottom:.75rem">Click to copy. Give this to agents so they can join this room.</div>
+    <div class="token-display" id="token-display" onclick="copyEl(this)" role="button" tabindex="0" onkeydown="copyKey(event)"></div>
+    <div style="color:#94a3b8;font-size:.65rem;margin-bottom:.75rem">Click to copy. Give this to agents so they can join this room.</div>
     <div class="btns"><button class="btn btn-sm" onclick="document.getElementById('token-modal').style.display='none'">Close</button></div>
   </div>
 </div>
 <!-- DM modal -->
 <div id="dm-modal" class="modal">
-  <div class="modal-box">
+  <div class="modal-box" role="dialog" aria-modal="true">
     <h3>DM with <span id="dm-target-name"></span></h3>
     <div id="dm-messages"></div>
     <textarea id="dm-input" rows="2" aria-label="Direct message" placeholder="Private message..."></textarea>
@@ -179,16 +179,16 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 </div>
 <!-- Room DMs modal: read-only view of all DMs between this room's members -->
 <div id="room-dms-modal" class="modal">
-  <div class="modal-box">
+  <div class="modal-box" role="dialog" aria-modal="true">
     <h3>Room DMs &mdash; <span id="room-dms-room-name"></span></h3>
-    <div style="color:#64748b;font-size:.7rem;margin-bottom:.5rem">Private messages between room members. Read-only.</div>
+    <div style="color:#94a3b8;font-size:.7rem;margin-bottom:.5rem">Private messages between room members. Read-only.</div>
     <div id="room-dms-messages"></div>
     <div class="btns"><button class="btn btn-sm" style="background:#475569" onclick="closeRoomDMs()">Close</button></div>
   </div>
 </div>
 <!-- Archived Rooms modal -->
 <div id="archived-rooms-modal" class="modal">
-  <div class="modal-box">
+  <div class="modal-box" role="dialog" aria-modal="true">
     <h3>Archived Rooms</h3>
     <div id="archived-rooms-list"></div>
     <div class="btns"><button class="btn btn-sm" style="background:#475569" onclick="document.getElementById('archived-rooms-modal').style.display='none'">Close</button></div>
@@ -196,7 +196,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#e2
 </div>
 <!-- API Token modal -->
 <div id="api-token-modal" class="modal">
-  <div class="modal-box">
+  <div class="modal-box" role="dialog" aria-modal="true">
     <h3>API Token</h3>
     <div style="color:#94a3b8;font-size:.75rem;margin-bottom:.5rem">Use this token with launch.sh: <code style="color:#38bdf8">export CHAIT_TOKEN=&lt;token&gt;</code></div>
     <div id="api-token-list"></div>
@@ -260,7 +260,7 @@ async function loadRooms(){
     return (order[a.status]||0)-(order[b.status]||0);
   });
   const el=document.getElementById('rooms-list');
-  if(!sorted.length){el.innerHTML='<div style="color:#64748b;padding:1rem;font-size:.8rem">No rooms yet. Click "+ Room" to create one.</div>';return}
+  if(!sorted.length){el.innerHTML='<div style="color:#94a3b8;padding:1rem;font-size:.8rem">No rooms yet. Click "+ Room" to create one.</div>';return}
   const roomsHtml=sorted.map(r=>{
     const sc='status-'+r.status;
     const hasUnread=activity&&activity[r.name]&&(!lastRead[r.name]||activity[r.name]>lastRead[r.name]);
@@ -324,26 +324,36 @@ async function pollMessages(){
   const msgs=await api(`/ui/api/rooms/${encodeURIComponent(room)}/messages?since=${encodeURIComponent(lastTs)}`);
   if(currentRoom!==room)return;  // switched rooms mid-fetch; drop stale result
   if(!msgs||!msgs.length)return;
-  appendMessages(msgs);lastTs=msgs[msgs.length-1].created_at;markRead(room,lastTs);loadRoomDetails();
+  appendMessages(msgs);lastTs=msgs[msgs.length-1].created_at;markRead(room,lastTs);
 }
+// ponytail: only auto-scroll when the user is already at/near the bottom, so a
+// re-render/append doesn't yank someone who scrolled up to read history.
+function nearBottom(el){return el.scrollHeight-el.scrollTop-el.clientHeight<80}
 function renderMessages(msgs){
   const el=document.getElementById('messages');
-  if(!msgs.length){el.innerHTML='<div style="color:#64748b;padding:2rem;text-align:center;font-size:.85rem">No messages yet.</div>';return}
-  el.innerHTML=msgs.map(fmtMsg).join('');el.scrollTop=el.scrollHeight;
+  if(!msgs.length){el.innerHTML='<div style="color:#94a3b8;padding:2rem;text-align:center;font-size:.85rem">No messages yet.</div>';return}
+  const stick=nearBottom(el);
+  el.innerHTML=msgs.map(fmtMsg).join('');if(stick)el.scrollTop=el.scrollHeight;
 }
-function appendMessages(msgs){const el=document.getElementById('messages');el.innerHTML+=msgs.map(fmtMsg).join('');el.scrollTop=el.scrollHeight}
+function appendMessages(msgs){const el=document.getElementById('messages');const stick=nearBottom(el);el.innerHTML+=msgs.map(fmtMsg).join('');if(stick)el.scrollTop=el.scrollHeight}
 function fmtMsg(m){
   const isHuman=m.author_role==='god';
   const pri=m.priority?' priority':'';
   const cls=`msg${pri}${isHuman?' human':''}`;
   const badge=m.priority?'<span class="priority-badge">PRIORITY</span>':'';
-  const t=new Date(m.created_at).toLocaleTimeString();
-  return `<div class="${cls}"><div class="meta"><span class="name">${esc(m.author_name)}</span> <span class="role">[${esc(m.author_role)}]</span> ${t}${badge}</div><div class="text">${renderMd(m.text)}</div></div>`;
+  const d=new Date(m.created_at);const t=d.toLocaleTimeString();
+  return `<div class="${cls}"><div class="meta"><span class="name">${esc(m.author_name)}</span> <span class="role">[${esc(m.author_role)}]</span> <span class="time" title="${esc(d.toLocaleString())}">${t}</span>${badge}</div><div class="text">${renderMd(m.text)}</div></div>`;
 }
 function esc(s){if(s==null)return'';return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 // ponytail: marked + DOMPurify for safe markdown rendering (same approach as OpenChamber)
 marked.use({breaks:true,gfm:true,renderer:{html({text}){return esc(text)}}});
+// Links in rendered markdown open in a new tab (with rel=noopener) instead of
+// navigating the dashboard away.
+DOMPurify.addHook('afterSanitizeAttributes',node=>{if(node.tagName==='A'){node.setAttribute('target','_blank');node.setAttribute('rel','noopener noreferrer')}});
 function renderMd(s){if(s==null)return'';try{return DOMPurify.sanitize(marked.parse(String(s)),{FORBID_TAGS:['style'],FORBID_CONTENTS:['style']})}catch(e){return esc(s)}}
+// Copy-to-clipboard helpers shared by the click-to-copy token displays (keyboard-accessible).
+function copyEl(el){navigator.clipboard.writeText(el.textContent)}
+function copyKey(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();copyEl(e.currentTarget)}}
 function jsattr(s){return esc(JSON.stringify(s))}
 
 // --- Room details (plan 26: status control) ---
@@ -359,7 +369,12 @@ async function loadRoomDetails(){
   currentMembers=room.members||[];
   const sel=document.getElementById('room-status-select');
   const statuses=['active','waiting-for-input','completed','blocked'];
-  sel.innerHTML=statuses.map(s=>`<option value="${s}" ${s===room.status?'selected':''}>${s}</option>`).join('');
+  // ponytail: the option set never changes — only the selection does. Rebuild the
+  // <option>s once, then just set .value, so an SSE tick can't clobber an open dropdown.
+  if(Array.from(sel.options).map(o=>o.value).join(',')!==statuses.join(',')){
+    sel.innerHTML=statuses.map(s=>`<option value="${s}">${s}</option>`).join('');
+  }
+  sel.value=room.status;
   const agentsHtml=currentMembers.map(m=>{
     const card=m.card||{};const skills=(card.skills||[]).join(', ');
     return `<div class="agent-card"><div class="agent-name">${esc(m.name)}</div><div class="agent-role">${esc(m.role)}</div>
@@ -370,7 +385,7 @@ async function loadRoomDetails(){
   if(agentsHtml!==lastAgentsHtml){lastAgentsHtml=agentsHtml;document.getElementById('agents-list').innerHTML=agentsHtml}
   const docs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/documents`);
   const docsHtml=(docs||[]).map(d=>
-    `<div class="doc-item"><a href="/api/v1/documents/${encodeURIComponent(d.id)}/download" target="_blank">${esc(d.filename)}</a> <span style="color:#64748b;font-size:.65rem">${(d.size/1024).toFixed(1)}KB</span></div>`
+    `<div class="doc-item"><a href="/api/v1/documents/${encodeURIComponent(d.id)}/download" target="_blank">${esc(d.filename)}</a> <span style="color:#94a3b8;font-size:.65rem">${(d.size/1024).toFixed(1)}KB</span></div>`
   ).join('');
   if(docsHtml!==lastDocsHtml){lastDocsHtml=docsHtml;document.getElementById('docs-list').innerHTML=docsHtml}
 }
@@ -407,7 +422,7 @@ async function openArchivedRooms(){
   document.getElementById('archived-rooms-modal').style.display='flex';
   const rooms=await api('/ui/api/rooms?archived=true');if(!rooms)return;
   const el=document.getElementById('archived-rooms-list');
-  if(!rooms.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem">No archived rooms.</div>';return}
+  if(!rooms.length){el.innerHTML='<div style="color:#94a3b8;font-size:.75rem">No archived rooms.</div>';return}
   el.innerHTML=rooms.map(r=>
     `<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.4rem">
       <div style="flex:1;font-size:.8rem">${esc(r.name)}</div>
@@ -448,13 +463,16 @@ async function uploadFile(){
 async function openDM(id,name){
   dmTargetId=id;
   document.getElementById('dm-target-name').textContent=name;
+  // Clear the previous conversation before fetching so the prior agent's DMs
+  // don't flash while the new history loads.
+  document.getElementById('dm-messages').innerHTML='';lastDmHtml=null;
   document.getElementById('dm-modal').style.display='flex';
   await loadDMHistory();
   document.getElementById('dm-input').focus();
 }
 function closeDM(){
   document.getElementById('dm-modal').style.display='none';
-  dmTargetId=null;
+  dmTargetId=null;lastDmHtml=null;
 }
 let lastDmHtml=null;
 async function loadDMHistory(){
@@ -462,12 +480,12 @@ async function loadDMHistory(){
   const msgs=await api(`/ui/api/dm/${dmTargetId}`);
   if(!msgs)return;
   const el=document.getElementById('dm-messages');
-  if(!msgs.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem">No messages yet.</div>';return}
+  if(!msgs.length){el.innerHTML='<div style="color:#94a3b8;font-size:.75rem">No messages yet.</div>';return}
   const html=msgs.map(m=>{
-    const t=new Date(m.created_at).toLocaleTimeString();
-    return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)}</span><span class="dm-time">${t}</span><div class="dm-text">${renderMd(m.text)}</div></div>`;
+    const d=new Date(m.created_at);const t=d.toLocaleTimeString();
+    return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)}</span><span class="dm-time" title="${esc(d.toLocaleString())}">${t}</span><div class="dm-text">${renderMd(m.text)}</div></div>`;
   }).join('');
-  if(html!==lastDmHtml){lastDmHtml=html;el.innerHTML=html;el.scrollTop=el.scrollHeight}
+  if(html!==lastDmHtml){const stick=nearBottom(el);lastDmHtml=html;el.innerHTML=html;if(stick)el.scrollTop=el.scrollHeight}
 }
 async function sendDM(){
   const text=document.getElementById('dm-input').value.trim();if(!text||!dmTargetId)return;
@@ -498,16 +516,16 @@ async function loadRoomDMs(){
   const msgs=await api(`/ui/api/rooms/${encodeURIComponent(currentRoom)}/dms`);
   if(!msgs)return;
   const el=document.getElementById('room-dms-messages');
-  if(!msgs.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem">No DMs between room members yet.</div>';return}
+  if(!msgs.length){el.innerHTML='<div style="color:#94a3b8;font-size:.75rem">No DMs between room members yet.</div>';return}
   const html=msgs.map(m=>{
-    const t=new Date(m.created_at).toLocaleTimeString();
-    return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)} &rarr; ${esc(nameFor(m.to_id))}</span><span class="dm-time">${t}</span><div class="dm-text">${renderMd(m.text)}</div></div>`;
+    const d=new Date(m.created_at);const t=d.toLocaleTimeString();
+    return `<div class="dm-msg"><span class="dm-from">${esc(m.from_name)} &rarr; ${esc(nameFor(m.to_id))}</span><span class="dm-time" title="${esc(d.toLocaleString())}">${t}</span><div class="dm-text">${renderMd(m.text)}</div></div>`;
   }).join('');
-  if(html!==lastRoomDmsHtml){lastRoomDmsHtml=html;el.innerHTML=html;el.scrollTop=el.scrollHeight}
+  if(html!==lastRoomDmsHtml){const stick=nearBottom(el);lastRoomDmsHtml=html;el.innerHTML=html;if(stick)el.scrollTop=el.scrollHeight}
 }
 
 // --- Room/token modals ---
-function openNewRoom(){document.getElementById('new-room-modal').style.display='flex';document.getElementById('new-room-name').focus();document.getElementById('new-room-result').style.display='none';document.getElementById('new-room-error').style.display='none';document.getElementById('create-room-btn').style.display='';document.getElementById('new-room-files').value=''}
+function openNewRoom(){document.getElementById('new-room-modal').style.display='flex';document.getElementById('new-room-name').value='';document.getElementById('new-room-topic').value='';document.getElementById('new-room-name').focus();document.getElementById('new-room-result').style.display='none';document.getElementById('new-room-error').style.display='none';document.getElementById('create-room-btn').style.display='';document.getElementById('new-room-files').value=''}
 function closeNewRoom(){document.getElementById('new-room-modal').style.display='none'}
 async function createRoom(){
   const name=document.getElementById('new-room-name').value.trim();
@@ -548,16 +566,16 @@ async function openApiTokens(){
   document.getElementById('api-token-modal').style.display='flex';
   const tokens=await api('/ui/api/tokens');if(!tokens)return;
   const el=document.getElementById('api-token-list');
-  if(!tokens.length){el.innerHTML='<div style="color:#64748b;font-size:.75rem;margin-bottom:.5rem">No API tokens yet.</div>';return}
+  if(!tokens.length){el.innerHTML='<div style="color:#94a3b8;font-size:.75rem;margin-bottom:.5rem">No API tokens yet.</div>';return}
   el.innerHTML=tokens.map(t=>
     `<div style="display:flex;gap:.5rem;align-items:center;margin-bottom:.4rem">
-      <div class="token-display" style="flex:1;margin:0;font-size:.7rem" onclick="navigator.clipboard.writeText(this.textContent)">${esc(t.token)}</div>
+      <div class="token-display" style="flex:1;margin:0;font-size:.7rem" onclick="copyEl(this)" role="button" tabindex="0" onkeydown="copyKey(event)">${esc(t.token)}</div>
       <button class="btn btn-sm" style="background:#ef4444;color:#fff" onclick="revokeApiToken(${jsattr(t.id)})">Revoke</button>
     </div>`
   ).join('');
 }
 async function generateApiToken(){await api('/ui/api/tokens',{method:'POST'});openApiTokens()}
-async function revokeApiToken(id){await api('/ui/api/tokens/'+encodeURIComponent(id),{method:'DELETE'});openApiTokens()}
+async function revokeApiToken(id){if(!confirm('Revoke this API token? Any client still using it will stop working. This cannot be undone.'))return;await api('/ui/api/tokens/'+encodeURIComponent(id),{method:'DELETE'});openApiTokens()}
 async function doLogout(){await fetch('/logout',{method:'POST'});location='/login'}
 
 // --- Keyboard shortcuts (plan 27: escape for modals) ---
@@ -568,6 +586,29 @@ document.addEventListener('keydown',e=>{
 // Click outside modal to dismiss
 document.querySelectorAll('.modal').forEach(modal=>{
   modal.addEventListener('click',e=>{if(e.target===modal)modal.style.display='none'})
+});
+
+// --- Modal a11y: move focus into a modal when it opens, restore it to the
+// opener when it closes. Not a full focus-trap (out of scope). Centralised via a
+// MutationObserver so it covers every open/close path (buttons, Escape, click-
+// outside). The trigger is captured on the opening click (capture phase runs
+// before the inline onclick), ignoring clicks inside a modal so it stays the
+// outside opener across close-button/backdrop clicks.
+let modalTrigger=null;
+document.addEventListener('click',e=>{
+  if(e.target instanceof Element&&!e.target.closest('.modal'))modalTrigger=e.target;
+},true);
+document.querySelectorAll('.modal').forEach(modal=>{
+  new MutationObserver(()=>{
+    const open=modal.style.display!=='none'&&modal.style.display!=='';
+    if(open&&modal.dataset.open!=='1'){
+      modal.dataset.open='1';
+      const f=modal.querySelector('input,textarea,select,button');if(f)f.focus();
+    }else if(!open&&modal.dataset.open==='1'){
+      modal.dataset.open='';
+      if(modalTrigger&&typeof modalTrigger.focus==='function'){modalTrigger.focus();modalTrigger=null}
+    }
+  }).observe(modal,{attributes:true,attributeFilter:['style']});
 });
 
 // --- Textarea auto-resize (plan 28a) ---
