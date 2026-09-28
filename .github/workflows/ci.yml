@@ -19,8 +19,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: 'pip'
-          cache-dependency-path: requirements.txt
-      - run: pip install ruff
+          cache-dependency-path: requirements*.lock
+      - run: pip install -r requirements-dev.lock
       - name: Lint
         run: ruff check server.py tests/
       - name: Format check
@@ -28,17 +28,18 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
           cache: 'pip'
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: requirements*.lock
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pytest httpx
+        run: pip install -r requirements-dev.lock
       - name: API tests
         run: pytest tests/test_api.py -v
       - name: Integration tests
@@ -52,13 +53,11 @@ jobs:
         with:
           python-version: "3.12"
           cache: 'pip'
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: requirements*.lock
       - name: Install Chrome
         uses: browser-actions/setup-chrome@48ad923757ca74d66703209fe939badbdf80f2f4  # v2.2.0
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pytest httpx selenium
+        run: pip install -r requirements-dev.lock
       - name: UI tests
         run: pytest tests/test_ui.py -v
 

@@ -1,3 +1,10 @@
+# Human-readable list of DIRECT runtime dependencies.
+# The exact, fully-pinned sets that actually get installed live in the lockfiles:
+#   requirements.lock      -- runtime only
+#   requirements-dev.lock  -- runtime + dev tools (pytest, httpx, ruff, selenium), a superset
+# Regenerate a lock in a clean venv:
+#   python3 -m venv /tmp/lock && /tmp/lock/bin/pip install -r requirements.txt && /tmp/lock/bin/pip freeze > requirements.lock
+#   python3 -m venv /tmp/lock && /tmp/lock/bin/pip install -r requirements.txt pytest httpx ruff selenium && /tmp/lock/bin/pip freeze > requirements-dev.lock
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 python-multipart>=0.0.9
