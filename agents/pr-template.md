@@ -13,5 +13,4 @@ No rigid template — match this skeleton, drop sections that don't apply.
 ## Rules
 
 - One paragraph per line — no hard-wrapping at a fixed column width. Let GitHub wrap it in the rendered view.
-- If a worklog entry exists for this change, reference it: "Full rationale in `docs/agent-worklog/<topic>.md`."
 - Always create as draft (`gh pr create --draft`); mark ready only when asked (see `AGENTS.md`).

@@ -23,7 +23,7 @@
 - Commit messages explain *why*, not *what*.
 - Create PRs as drafts (`gh pr create --draft`). Mark ready only when asked.
 - Don't force-push without confirming.
-- Every PR that changes the product must include a worklog entry in the same PR (see table below).
+- Worklog entries are kept **local only** for now: `docs/agent-worklog/` and `docs/plans/` are gitignored and must not be committed/shipped. Keep worklogs there for your own tracking, but do not add them to PRs.
 
 ## Task-specific guidance
 
