@@ -54,11 +54,31 @@ RESERVED_ROLES = {"god", "human", "admin", "system"}
 
 # Rate limiting
 _rate_buckets: dict[str, list[float]] = {}
+_last_sweep: float = 0.0
+
+
+def _sweep_rate_buckets(now: float):
+    """Evict stale entries/buckets so _rate_buckets can't grow unbounded.
+
+    Runs at most once per minute: O(n) trim of every bucket to entries newer
+    than 60s, dropping now-empty buckets (e.g. one-off login attempts).
+    """
+    global _last_sweep
+    if now - _last_sweep < 60:
+        return
+    _last_sweep = now
+    for k in list(_rate_buckets):
+        fresh = [t for t in _rate_buckets[k] if now - t < 60]
+        if fresh:
+            _rate_buckets[k] = fresh
+        else:
+            del _rate_buckets[k]
 
 
 def _check_rate(key: str, max_per_minute: int = 30):
     """Sliding-window rate limiter. Raises 429 if exceeded."""
     now = time.time()
+    _sweep_rate_buckets(now)
     bucket = _rate_buckets.setdefault(key, [])
     bucket[:] = [t for t in bucket if now - t < 60]
     if len(bucket) >= max_per_minute * RATE_LIMIT_MULTIPLIER:
@@ -92,7 +112,13 @@ _ui_subscribers: set[asyncio.Queue] = set()
 
 def _broadcast_ui(kind: str):
     for q in _ui_subscribers:
-        q.put_nowait(kind)
+        try:
+            q.put_nowait(kind)
+        except asyncio.QueueFull:
+            # Dropping a tick is harmless: the payload is only a debug label and
+            # every browser re-runs its idempotent fetches on any event. A full
+            # queue already has pending ticks that will trigger the same refresh.
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +203,7 @@ async def init_db():
         CREATE INDEX IF NOT EXISTS idx_dms_to ON dms(to_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_dms_from ON dms(from_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_agents_room ON agents(room_id);
+        CREATE INDEX IF NOT EXISTS idx_documents_room ON documents(room_id, created_at);
     """)
     # Migrations for existing DBs
     for col, tbl, default in [
@@ -578,8 +605,7 @@ async def me_endpoint(agent: dict = Depends(auth_agent)):
 
 
 @app.put("/api/v1/me/card")
-async def update_card(request: Request, agent: dict = Depends(auth_agent)):
-    card = await request.json()
+async def update_card(card: dict, agent: dict = Depends(auth_agent)):
     db = await get_db()
     await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
     await db.commit()
@@ -687,7 +713,7 @@ async def post_message(room_name: str, body: MessageRequest, agent: dict = Depen
 async def get_messages(
     room_name: str,
     since: Optional[str] = None,
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     agent: dict = Depends(auth_agent),
 ):
     db = await get_db()
@@ -741,7 +767,7 @@ async def send_dm(target_id: str, body: DMRequest, agent: dict = Depends(auth_ag
 async def get_dms(
     target_id: str,
     since: Optional[str] = None,
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, ge=1, le=200),
     agent: dict = Depends(auth_agent),
 ):
     db = await get_db()
@@ -921,7 +947,9 @@ async def login_page():
 async def login_submit(request: Request):
     _check_rate(f"login:{request.client.host if request.client else 'unknown'}", max_per_minute=5)
     form = await request.form()
-    if form.get("user") == HUMAN_USER and form.get("password") == HUMAN_PASS:
+    if secrets.compare_digest(str(form.get("user") or ""), HUMAN_USER) and secrets.compare_digest(
+        str(form.get("password") or ""), HUMAN_PASS
+    ):
         db = await get_db()
         tok = secrets.token_hex(32)
         await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (tok, _now()))
@@ -1013,7 +1041,7 @@ async def ui_events(session: str = Depends(require_human)):
     Carries no per-event payload beyond a debug label — the browser just
     re-runs its normal (cheap, idempotent) fetch functions on any tick.
     """
-    queue: asyncio.Queue = asyncio.Queue()
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
     _ui_subscribers.add(queue)
 
     async def gen():
