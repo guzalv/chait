@@ -886,6 +886,29 @@ class TestSecurityHardening:
         assert r.status_code == 303
 
 
+class TestSecurityHeaders:
+    def test_headers_present_on_normal_response(self, client):
+        r = client.get("/health")
+        assert r.status_code == 200
+        csp = r.headers["Content-Security-Policy"]
+        assert "default-src 'self'" in csp
+        assert "frame-ancestors 'none'" in csp
+        assert r.headers["X-Content-Type-Options"] == "nosniff"
+        assert r.headers["X-Frame-Options"] == "DENY"
+        assert r.headers["Referrer-Policy"] == "no-referrer"
+        assert r.headers["Permissions-Policy"] == "geolocation=(), microphone=(), camera=()"
+
+    def test_hsts_absent_without_secure_cookies(self, client, monkeypatch):
+        monkeypatch.setattr(server, "SECURE_COOKIES", False)
+        r = client.get("/health")
+        assert "Strict-Transport-Security" not in r.headers
+
+    def test_hsts_present_with_secure_cookies(self, client, monkeypatch):
+        monkeypatch.setattr(server, "SECURE_COOKIES", True)
+        r = client.get("/health")
+        assert r.headers["Strict-Transport-Security"] == "max-age=31536000; includeSubDomains"
+
+
 # ---------------------------------------------------------------------------
 # Instructions
 # ---------------------------------------------------------------------------

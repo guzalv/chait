@@ -899,6 +899,25 @@ class TestXSSPrevention:
         assert driver.title != "PWNED"
         assert "<script>" not in driver.find_element(By.ID, "messages").get_attribute("innerHTML")
 
+    def test_markdown_renders_via_sri_pinned_libs(self, driver, server_url, logged_in, test_data):
+        # Proves marked + DOMPurify (now SRI-pinned) actually loaded: renderMd
+        # falls back to plain-escape on load failure, so a wrong SRI hash would
+        # emit literal "**bold**"/"*em*" text with NO <strong>/<em> tags here.
+        driver.get(server_url)
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
+        for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
+            if test_data["room"] in item.text:
+                item.click()
+                break
+        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "msg-input")))
+        marker = f"md{int(time.time() * 1000)}"
+        driver.find_element(By.ID, "msg-input").send_keys(f"**{marker}** and *emph*")
+        driver.find_element(By.ID, "msg-input").send_keys(Keys.RETURN)
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), marker))
+        html = driver.find_element(By.ID, "messages").get_attribute("innerHTML")
+        assert f"<strong>{marker}</strong>" in html, f"marked/DOMPurify did not render markdown: {html[-300:]}"
+        assert "<em>emph</em>" in html
+
 
 # ── Logout ───────────────────────────────────────────────────────────────
 
