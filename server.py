@@ -1,6 +1,7 @@
 """chait - real-time AI agent collaboration chat server."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -230,6 +231,19 @@ async def init_db():
     # rowid) before creating the unique index or the CREATE would fail.
     await _db.execute("DELETE FROM agents WHERE rowid NOT IN (SELECT MIN(rowid) FROM agents GROUP BY name, room_id)")
     await _db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_name_room ON agents(name, room_id)")
+    # Hash-at-rest migration (done in Python — SQLite has no sha256). Runs at
+    # startup before any request, so no _write_lock needed; the commit below covers it.
+    # Agent tokens: convert any still-plaintext value (sk- prefix) to its hash so
+    # already-issued tokens keep authenticating. Idempotent — already-hashed rows
+    # are 64-hex with no sk- prefix and are skipped.
+    agent_rows = await _db.execute_fetchall("SELECT id, agent_token FROM agents")
+    for r in agent_rows:
+        tok = r["agent_token"]
+        if tok.startswith("sk-"):
+            await _db.execute("UPDATE agents SET agent_token = ? WHERE id = ?", (_hash_token(tok), r["id"]))
+    # Sessions: plaintext can't be re-derived into a hash the existing cookies
+    # would match, so just drop them all — users simply log in again.
+    await _db.execute("DELETE FROM sessions")
     # Seed the monotonic clock from persisted data so timestamps keep increasing
     # across restarts (otherwise a fresh in-memory _last_ts could re-emit values
     # <= existing rows and break the cursor).
@@ -275,9 +289,21 @@ def _uid() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def _hash_token(token: str) -> str:
+    """SHA-256 hex digest used to store pure-credential tokens at rest.
+
+    Applied to agent tokens (agents.agent_token) and human session tokens
+    (sessions.token): both are only ever presented once and matched by exact
+    value, so we keep only the hash and compare hashes on lookup. Join tokens
+    and API tokens are intentionally left plaintext (the UI re-displays them).
+    """
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
 async def _get_agent_by_token(token: str) -> Optional[dict]:
     db = await get_db()
-    rows = await db.execute_fetchall("SELECT * FROM agents WHERE agent_token = ?", (token,))
+    # agent_token is stored hashed; hash the presented plaintext to match.
+    rows = await db.execute_fetchall("SELECT * FROM agents WHERE agent_token = ?", (_hash_token(token),))
     return dict(rows[0]) if rows else None
 
 
@@ -313,8 +339,9 @@ async def auth_human(request: Request) -> Optional[str]:
         return None
     db = await get_db()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    # Sessions are stored hashed; hash the cookie value to match.
     rows = await db.execute_fetchall(
-        "SELECT * FROM sessions WHERE token = ? AND created_at > ?", (session_token, cutoff)
+        "SELECT * FROM sessions WHERE token = ? AND created_at > ?", (_hash_token(session_token), cutoff)
     )
     return session_token if rows else None
 
@@ -660,44 +687,72 @@ async def join_with_token(request: Request, body: JoinRequest):
     existing = await db.execute_fetchall(
         "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"])
     )
+    # Fresh TTL for every issued/rotated token, so a re-join never hands back a
+    # token that is already expired.
+    expires = (
+        (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
+    )
     if existing:
         agent = dict(existing[0])
-        if card:
-            async with _write_lock:
-                await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent["id"]))
-                await db.commit()
         agent_id = agent["id"]
-        agent_token = agent["agent_token"]
-        logger.info("Agent '%s' re-joined room '%s' (existing)", name, room["name"])
+        # Re-join rotates the token: the plaintext is no longer stored (only its
+        # hash), so the original can't be returned. Issue a fresh sk- token,
+        # persist its hash on the same row, and return the new plaintext with the
+        # SAME id — idempotent on identity, at the cost of invalidating the old
+        # token. (card is refreshed in the same write if provided.)
+        agent_token = f"sk-{secrets.token_hex(24)}"
+        async with _write_lock:
+            if card:
+                await db.execute(
+                    "UPDATE agents SET agent_token = ?, card = ?, expires_at = ? WHERE id = ?",
+                    (_hash_token(agent_token), json.dumps(card), expires, agent_id),
+                )
+            else:
+                await db.execute(
+                    "UPDATE agents SET agent_token = ?, expires_at = ? WHERE id = ?",
+                    (_hash_token(agent_token), expires, agent_id),
+                )
+            await db.commit()
+        logger.info("Agent '%s' re-joined room '%s' (existing, token rotated)", name, room["name"])
     else:
         agent_id = _uid()
         agent_token = f"sk-{secrets.token_hex(24)}"
-        expires = (
-            (datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)).isoformat() if TOKEN_TTL_HOURS > 0 else None
-        )
         async with _write_lock:
             try:
+                # Store only the hash; the plaintext is returned once to the caller.
                 await db.execute(
                     "INSERT INTO agents (id, name, role, agent_token, card, room_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (agent_id, name, role, agent_token, json.dumps(card), room["id"], _now(), expires),
+                    (agent_id, name, role, _hash_token(agent_token), json.dumps(card), room["id"], _now(), expires),
                 )
                 await db.commit()
                 logger.info("Agent '%s' (role=%s) joined room '%s'", name, role, room["name"])
             except aiosqlite.IntegrityError:
                 # A concurrent request inserted the same (name, room_id) first (unique
-                # index). Reuse that agent so the join stays idempotent instead of 500.
+                # index). Rotate onto that row so the join stays idempotent instead of
+                # 500 — and returns a fresh working plaintext token (same reason as the
+                # re-join branch above: the stored value is a hash we can't reverse).
                 await db.rollback()
                 existing = await db.execute_fetchall(
                     "SELECT id, agent_token, role FROM agents WHERE name = ? AND room_id = ?", (name, room["id"])
                 )
                 agent = dict(existing[0])
                 agent_id = agent["id"]
-                agent_token = agent["agent_token"]
                 role = agent["role"]
+                agent_token = f"sk-{secrets.token_hex(24)}"
                 if card:
-                    await db.execute("UPDATE agents SET card = ? WHERE id = ?", (json.dumps(card), agent_id))
-                    await db.commit()
-                logger.info("Agent '%s' re-joined room '%s' (existing, race resolved)", name, room["name"])
+                    await db.execute(
+                        "UPDATE agents SET agent_token = ?, card = ?, expires_at = ? WHERE id = ?",
+                        (_hash_token(agent_token), json.dumps(card), expires, agent_id),
+                    )
+                else:
+                    await db.execute(
+                        "UPDATE agents SET agent_token = ?, expires_at = ? WHERE id = ?",
+                        (_hash_token(agent_token), expires, agent_id),
+                    )
+                await db.commit()
+                logger.info(
+                    "Agent '%s' re-joined room '%s' (existing, race resolved, token rotated)", name, room["name"]
+                )
     _broadcast_ui("agents")
     # Include room context so agents know what they're joining
     docs = await db.execute_fetchall(
@@ -736,6 +791,8 @@ async def api_create_room(body: RoomCreateRequest, _token: str = Depends(auth_ma
             "existing": True,
         }
     room_id = _uid()
+    # Left plaintext by design: the UI re-displays join tokens (New Room result
+    # and the room "Token" button / ui_room_token), so they can't be one-way hashed.
     join_token = f"chait-{secrets.token_hex(16)}"
     async with _write_lock:
         try:
@@ -1121,7 +1178,8 @@ async def login_submit(request: Request):
         db = await get_db()
         tok = secrets.token_hex(32)
         async with _write_lock:
-            await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (tok, _now()))
+            # Cookie carries the plaintext; DB keeps only its hash (pure credential).
+            await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (_hash_token(tok), _now()))
             await db.commit()
         resp = RedirectResponse("/", status_code=303)
         resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", secure=SECURE_COOKIES, max_age=86400 * 7)
@@ -1141,7 +1199,8 @@ async def logout(request: Request):
     if session_token:
         db = await get_db()
         async with _write_lock:
-            await db.execute("DELETE FROM sessions WHERE token = ?", (session_token,))
+            # Sessions are stored hashed; delete by hash of the cookie value.
+            await db.execute("DELETE FROM sessions WHERE token = ?", (_hash_token(session_token),))
             await db.commit()
     resp = RedirectResponse("/login", status_code=303)
     resp.delete_cookie("chait_session")
@@ -1183,6 +1242,8 @@ async def ui_create_room(request: Request, session: str = Depends(require_human)
             "existing": True,
         }
     room_id = _uid()
+    # Left plaintext by design: the UI re-displays join tokens (New Room result
+    # and the room "Token" button / ui_room_token), so they can't be one-way hashed.
     join_token = f"chait-{secrets.token_hex(16)}"
     async with _write_lock:
         try:
@@ -1506,6 +1567,8 @@ async def ui_create_api_token(session: str = Depends(require_human)):
     """Generate a new API token for CLI use (e.g. launch.sh)."""
     db = await get_db()
     token_id = _uid()
+    # Left plaintext by design: ui_list_api_tokens lists these in full, so the
+    # value must be recoverable — it can't be a one-way hash.
     token = f"chait-api-{secrets.token_hex(24)}"
     async with _write_lock:
         await db.execute(
