@@ -27,6 +27,11 @@ USER = "uitestuser"
 PASS = "uitestpass"
 
 
+def wait(driver, cond, t=10):
+    """Small WebDriverWait wrapper to cut boilerplate on explicit waits."""
+    return WebDriverWait(driver, t).until(cond)
+
+
 def _free_port():
     with socket.socket() as s:
         s.bind(("", 0))
@@ -159,8 +164,12 @@ def test_data(server_url):
     return {"room": room_name, "agent": agent, "agent_token": token}
 
 
-@pytest.fixture(scope="session")
-def driver():
+def _make_chrome(mobile=False):
+    """Create a Chrome driver, optionally with mobile emulation.
+
+    Centralises option-building so the session `driver`, the function-scoped
+    `fresh_driver`, and `mobile_driver` fixtures don't each duplicate it.
+    """
     opts = webdriver.ChromeOptions()
     # Try snap chromium, fall back to system
     snap_bin = "/snap/chromium/current/usr/lib/chromium-browser/chrome"
@@ -171,30 +180,73 @@ def driver():
         "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
-        "--window-size=1920,1080",
         f"--user-data-dir={tempfile.mkdtemp(dir='/tmp')}",
     ]:
         opts.add_argument(a)
+    if mobile:
+        opts.add_experimental_option(
+            "mobileEmulation",
+            {
+                "deviceMetrics": {"width": 390, "height": 844, "pixelRatio": 3.0},
+                "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
+            },
+        )
+    else:
+        opts.add_argument("--window-size=1920,1080")
     snap_driver = "/snap/bin/chromium.chromedriver"
     if os.path.exists(snap_driver):
         svc = webdriver.ChromeService(executable_path=snap_driver)
-        d = webdriver.Chrome(service=svc, options=opts)
-    else:
-        d = webdriver.Chrome(options=opts)
+        return webdriver.Chrome(service=svc, options=opts)
+    return webdriver.Chrome(options=opts)
+
+
+@pytest.fixture(scope="session")
+def driver():
+    d = _make_chrome()
     d.implicitly_wait(2)
     yield d
     d.quit()
 
 
+@pytest.fixture
+def fresh_driver():
+    """Function-scoped browser with its own session, for tests that must not
+    disturb the shared session-scoped `driver` (e.g. logout, which invalidates
+    the session cookie)."""
+    d = _make_chrome()
+    d.implicitly_wait(2)
+    yield d
+    d.quit()
+
+
+def _do_login(d, server_url):
+    """Log a driver in via the web login form."""
+    d.get(f"{server_url}/login")
+    WebDriverWait(d, 10).until(EC.presence_of_element_located((By.TAG_NAME, "form")))
+    d.find_element(By.CSS_SELECTOR, 'input[name="user"]').send_keys(USER)
+    d.find_element(By.CSS_SELECTOR, 'input[name="password"]').send_keys(PASS)
+    d.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
+    WebDriverWait(d, 10).until(lambda drv: "/login" not in drv.current_url)
+
+
+def _reset_selection(d, server_url):
+    """Force a clean 'no room selected' load on a shared driver.
+
+    The dashboard persists the selected room in sessionStorage and auto-restores
+    it on load (hiding #no-room / the mobile sidebar). A prior test may have left
+    a room selected, so tests that assert the unselected state must reset first.
+    The unique query string busts same-URL fragment navigation so init() re-runs
+    with no saved room and no hash; the server ignores the query string.
+    """
+    d.get(server_url)
+    d.execute_script("sessionStorage.removeItem('chait_room')")
+    d.get(f"{server_url}/?reset={int(time.time() * 1000)}")
+
+
 @pytest.fixture(scope="session")
 def logged_in(driver, server_url):
     """Log in once for all tests that need a session."""
-    driver.get(f"{server_url}/login")
-    WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "form")))
-    driver.find_element(By.CSS_SELECTOR, 'input[name="user"]').send_keys(USER)
-    driver.find_element(By.CSS_SELECTOR, 'input[name="password"]').send_keys(PASS)
-    driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
-    WebDriverWait(driver, 10).until(lambda d: "/login" not in d.current_url)
+    _do_login(driver, server_url)
     return True
 
 
@@ -224,15 +276,17 @@ class TestLogin:
         driver.find_element(By.CSS_SELECTOR, 'input[name="user"]').send_keys("wrong")
         driver.find_element(By.CSS_SELECTOR, 'input[name="password"]').send_keys("wrong")
         driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
-        time.sleep(1)
-        assert "Invalid" in driver.page_source or "invalid" in driver.page_source.lower()
+        wait(driver, lambda d: "invalid" in d.page_source.lower())
+        assert "invalid" in driver.page_source.lower()
 
-    def test_dashboard_redirects_without_session(self, driver, server_url):
-        # Clear cookies to simulate no session
-        driver.delete_all_cookies()
-        driver.get(server_url)
-        time.sleep(1)
-        assert "/login" in driver.current_url
+    def test_dashboard_redirects_without_session(self, fresh_driver, server_url):
+        # Own browser: deleting cookies to simulate "no session" must NOT log out
+        # the shared session-scoped `driver` (whose login fixture won't re-run).
+        fresh_driver.get(server_url)
+        fresh_driver.delete_all_cookies()
+        fresh_driver.get(server_url)
+        wait(fresh_driver, EC.url_contains("/login"))
+        assert "/login" in fresh_driver.current_url
 
 
 # ── Dashboard layout ─────────────────────────────────────────────────────
@@ -269,8 +323,11 @@ class TestDashboard:
         assert "documents" in panel_text
 
     def test_select_room_placeholder(self, driver, server_url, logged_in):
-        driver.get(server_url)
+        # Order-independent: clear any room a prior test persisted so the app
+        # loads showing the placeholder rather than auto-restoring a room.
+        _reset_selection(driver, server_url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "no-room")))
+        wait(driver, lambda d: "Select a room" in d.find_element(By.ID, "no-room").text)
         el = driver.find_element(By.ID, "no-room")
         assert "Select a room" in el.text
 
@@ -369,7 +426,7 @@ class TestHumanMessaging:
         textarea = driver.find_element(By.ID, "msg-input")
         textarea.send_keys("Button send test")
         driver.find_element(By.CSS_SELECTOR, "#input-area .btn").click()
-        time.sleep(1)
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), "Button send test"))
         # Atomic read: SSE re-renders #messages .msg, so collect text in one call.
         msgs_text = driver.execute_script(
             "return Array.from(document.querySelectorAll('#messages .msg')).map(m => m.innerText)"
@@ -381,7 +438,7 @@ class TestHumanMessaging:
         textarea = driver.find_element(By.ID, "msg-input")
         textarea.send_keys("Enter send test")
         textarea.send_keys(Keys.RETURN)
-        time.sleep(1)
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), "Enter send test"))
         # Atomic read: SSE re-renders #messages .msg, so collect text in one call.
         msgs_text = driver.execute_script(
             "return Array.from(document.querySelectorAll('#messages .msg')).map(m => m.innerText)"
@@ -389,9 +446,16 @@ class TestHumanMessaging:
         assert any("Enter send test" in t for t in msgs_text)
 
     def test_sent_message_has_human_author_and_priority(self, driver, server_url, logged_in, test_data):
+        # Order-independent: send our own human message rather than relying on
+        # messages left behind by earlier tests. UI messages are always authored
+        # as Human/[god] with priority (server.py inserts author_role='god',
+        # priority=1), so this message alone satisfies the assertions below.
         self._select_room(driver, server_url, test_data)
-        # Look for any human message already sent
-        time.sleep(1)
+        unique = f"human-prio-{int(time.time() * 1000)}"
+        textarea = driver.find_element(By.ID, "msg-input")
+        textarea.send_keys(unique)
+        textarea.send_keys(Keys.RETURN)
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), unique))
         # Atomic read: SSE re-renders #messages .msg, so collect text in one call.
         msgs_text = driver.execute_script(
             "return Array.from(document.querySelectorAll('#messages .msg')).map(m => m.innerText)"
@@ -419,7 +483,11 @@ class TestFileUpload:
         assert any("Upload" in l.text for l in labels)
 
     def test_hidden_file_input(self, driver, server_url, logged_in, test_data):
-        fi = driver.find_element(By.ID, "file-input")
+        # Order-independent: navigate to the dashboard ourselves rather than
+        # relying on the previous test leaving the driver there. #file-input is
+        # in the static DOM (inside the hidden room-view), so no room is needed.
+        driver.get(server_url)
+        fi = wait(driver, EC.presence_of_element_located((By.ID, "file-input")))
         assert fi.get_attribute("type") == "file"
 
 
@@ -459,7 +527,7 @@ class TestDMModal:
             if "Close" in btn.text:
                 btn.click()
                 break
-        time.sleep(0.5)
+        wait(driver, lambda d: d.find_element(By.ID, "dm-modal").value_of_css_property("display") == "none")
         modal = driver.find_element(By.ID, "dm-modal")
         assert modal.value_of_css_property("display") == "none"
 
@@ -480,7 +548,7 @@ class TestLiveUpdates:
         textarea = driver.find_element(By.ID, "msg-input")
         textarea.send_keys(unique)
         textarea.send_keys(Keys.RETURN)
-        time.sleep(2)
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), unique))
         assert unique in driver.find_element(By.ID, "messages").text
 
     def test_api_message_appears_on_poll(self, driver, server_url, logged_in, test_data):
@@ -495,8 +563,9 @@ class TestLiveUpdates:
         _api_post(
             server_url, f"/api/v1/rooms/{test_data['room']}/messages", {"text": unique}, token=test_data["agent_token"]
         )
-        # SSE should deliver near-instantly; generous margin for CI jitter.
-        time.sleep(5)
+        # SSE should deliver near-instantly; wait (don't sleep) with a generous
+        # timeout for CI jitter.
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), unique), t=15)
         assert unique in driver.find_element(By.ID, "messages").text
 
 
@@ -555,37 +624,6 @@ class TestSSEEndpoint:
 # ── Mobile viewport tests ────────────────────────────────────────────────
 
 
-def _make_chrome(mobile=False):
-    """Create a Chrome driver, optionally with mobile emulation."""
-    opts = webdriver.ChromeOptions()
-    snap_bin = "/snap/chromium/current/usr/lib/chromium-browser/chrome"
-    if os.path.exists(snap_bin):
-        opts.binary_location = snap_bin
-    for a in [
-        "--headless=new",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-        f"--user-data-dir={tempfile.mkdtemp(dir='/tmp')}",
-    ]:
-        opts.add_argument(a)
-    if mobile:
-        opts.add_experimental_option(
-            "mobileEmulation",
-            {
-                "deviceMetrics": {"width": 390, "height": 844, "pixelRatio": 3.0},
-                "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-            },
-        )
-    else:
-        opts.add_argument("--window-size=1920,1080")
-    snap_driver = "/snap/bin/chromium.chromedriver"
-    if os.path.exists(snap_driver):
-        svc = webdriver.ChromeService(executable_path=snap_driver)
-        return webdriver.Chrome(service=svc, options=opts)
-    return webdriver.Chrome(options=opts)
-
-
 @pytest.fixture(scope="session")
 def mobile_driver():
     d = _make_chrome(mobile=True)
@@ -596,12 +634,7 @@ def mobile_driver():
 
 @pytest.fixture(scope="session")
 def mobile_logged_in(mobile_driver, server_url):
-    mobile_driver.get(f"{server_url}/login")
-    WebDriverWait(mobile_driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "form")))
-    mobile_driver.find_element(By.CSS_SELECTOR, 'input[name="user"]').send_keys(USER)
-    mobile_driver.find_element(By.CSS_SELECTOR, 'input[name="password"]').send_keys(PASS)
-    mobile_driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
-    WebDriverWait(mobile_driver, 10).until(lambda d: "/login" not in d.current_url)
+    _do_login(mobile_driver, server_url)
     return True
 
 
@@ -618,7 +651,9 @@ def _mobile_select_room(mobile_driver, server_url, test_data):
 
 class TestMobile:
     def test_mobile_sidebar_visible_on_load(self, mobile_driver, server_url, mobile_logged_in):
-        mobile_driver.get(server_url)
+        # Order-independent: a prior mobile test may have selected a room (which
+        # hides the sidebar and is persisted/auto-restored). Reset to no-room.
+        _reset_selection(mobile_driver, server_url)
         WebDriverWait(mobile_driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
         assert mobile_driver.find_element(By.ID, "sidebar").is_displayed()
 
@@ -645,7 +680,7 @@ class TestMobile:
     def test_mobile_back_button_returns_to_sidebar(self, mobile_driver, server_url, mobile_logged_in, test_data):
         _mobile_select_room(mobile_driver, server_url, test_data)
         mobile_driver.find_element(By.CSS_SELECTOR, ".mobile-back").click()
-        time.sleep(0.5)
+        wait(mobile_driver, EC.visibility_of_element_located((By.ID, "sidebar")))
         assert mobile_driver.find_element(By.ID, "sidebar").is_displayed()
 
     def test_mobile_no_js_errors(self, mobile_driver, server_url, mobile_logged_in, test_data):
@@ -664,22 +699,22 @@ class TestModalDismiss:
         driver.get(server_url)
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#sidebar h1")))
         driver.find_element(By.XPATH, "//button[contains(text(),'+ Room')]").click()
-        time.sleep(0.3)
         modal = driver.find_element(By.ID, "new-room-modal")
+        wait(driver, lambda d: modal.value_of_css_property("display") != "none")
         assert modal.value_of_css_property("display") != "none"
         webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-        time.sleep(0.3)
+        wait(driver, lambda d: modal.value_of_css_property("display") == "none")
         assert modal.value_of_css_property("display") == "none"
 
     def test_click_outside_closes_modal(self, driver, server_url, logged_in):
         driver.get(server_url)
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#sidebar h1")))
         driver.find_element(By.XPATH, "//button[contains(text(),'+ Room')]").click()
-        time.sleep(0.3)
         modal = driver.find_element(By.ID, "new-room-modal")
+        wait(driver, lambda d: modal.value_of_css_property("display") != "none")
         assert modal.value_of_css_property("display") != "none"
         driver.execute_script("document.getElementById('new-room-modal').click()")
-        time.sleep(0.3)
+        wait(driver, lambda d: modal.value_of_css_property("display") == "none")
         assert modal.value_of_css_property("display") == "none"
 
 
@@ -691,7 +726,7 @@ class TestRoomCreation:
         driver.get(server_url)
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#sidebar h1")))
         driver.find_element(By.XPATH, "//button[contains(text(),'+ Room')]").click()
-        time.sleep(0.3)
+        wait(driver, EC.visibility_of_element_located((By.ID, "new-room-name")))
         name_input = driver.find_element(By.ID, "new-room-name")
         room_name = f"ui-create-{int(time.time())}"
         name_input.send_keys(room_name)
@@ -700,16 +735,34 @@ class TestRoomCreation:
         assert driver.find_element(By.ID, "new-room-token").text.startswith("chait-")
 
     def test_created_room_in_sidebar(self, driver, server_url, logged_in):
+        # Order-independent: create our own uniquely-named room via the modal
+        # rather than depending on a room/modal left behind by a prior test.
+        driver.get(server_url)
+        wait(driver, EC.presence_of_element_located((By.CSS_SELECTOR, "#sidebar h1")))
+        driver.find_element(By.XPATH, "//button[contains(text(),'+ Room')]").click()
+        wait(driver, EC.visibility_of_element_located((By.ID, "new-room-name")))
+        room_name = f"ui-sidebar-{int(time.time() * 1000)}"
+        driver.find_element(By.ID, "new-room-name").send_keys(room_name)
+        driver.find_element(By.ID, "create-room-btn").click()
+        wait(driver, lambda d: d.find_element(By.ID, "new-room-token").text.startswith("chait-"))
         for btn in driver.find_elements(By.CSS_SELECTOR, "#new-room-modal .btn"):
             if "Close" in btn.text:
                 btn.click()
                 break
-        time.sleep(0.5)
         # Atomic read: SSE re-renders .room-item, so collect text in one call.
+        wait(
+            driver,
+            lambda d: any(
+                room_name in t
+                for t in d.execute_script(
+                    "return Array.from(document.querySelectorAll('.room-item')).map(i => i.innerText)"
+                )
+            ),
+        )
         items_text = driver.execute_script(
             "return Array.from(document.querySelectorAll('.room-item')).map(i => i.innerText)"
         )
-        assert any("ui-create-" in t for t in items_text)
+        assert any(room_name in t for t in items_text)
 
 
 # ── Connection status ────────────────────────────────────────────────────
@@ -750,15 +803,26 @@ class TestRoomStatusControl:
 
         self._select_room(driver, server_url, test_data)
         Select(driver.find_element(By.ID, "room-status-select")).select_by_value("waiting-for-input")
-        time.sleep(2)
+
         # Atomic read: SSE re-renders .room-item, so collect text in one call.
+        def _room_status_contains(word):
+            return lambda d: any(
+                word in t.lower()
+                for t in d.execute_script(
+                    "return Array.from(document.querySelectorAll('.room-item')).map(i => i.innerText)"
+                )
+                if test_data["room"] in t
+            )
+
+        wait(driver, _room_status_contains("waiting"))
         items_text = driver.execute_script(
             "return Array.from(document.querySelectorAll('.room-item')).map(i => i.innerText)"
         )
         assert any("waiting" in t.lower() for t in items_text if test_data["room"] in t)
-        # Reset
+        # Reset — wait until the sidebar reflects the reset so a later test that
+        # asserts on this room's status isn't racing an in-flight re-render.
         Select(driver.find_element(By.ID, "room-status-select")).select_by_value("active")
-        time.sleep(1)
+        wait(driver, _room_status_contains("active"))
 
 
 # ── Human message styling ────────────────────────────────────────────────
@@ -773,9 +837,10 @@ class TestMessageStyling:
                 item.click()
                 break
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "msg-input")))
-        driver.find_element(By.ID, "msg-input").send_keys("style-test")
+        unique = f"style-test-{int(time.time() * 1000)}"
+        driver.find_element(By.ID, "msg-input").send_keys(unique)
         driver.find_element(By.ID, "msg-input").send_keys(Keys.RETURN)
-        time.sleep(1)
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), unique))
         assert len(driver.find_elements(By.CSS_SELECTOR, "#messages .msg.human")) > 0
 
 
@@ -789,11 +854,12 @@ class TestXSSPrevention:
         room_name = f"xss-{int(time.time())}"
         # Create room via driver's existing session (avoids extra _login_session call)
         driver.execute_script(f"""
+            window._xss_token=null;
             fetch('/ui/api/rooms', {{method:'POST', headers:{{'Content-Type':'application/json'}},
                 body: JSON.stringify({{name: '{room_name}', topic: ''}})
             }}).then(r=>r.json()).then(d=>window._xss_token=d.join_token)
         """)
-        time.sleep(1)
+        wait(driver, lambda d: d.execute_script("return window._xss_token") is not None)
         join_token = driver.execute_script("return window._xss_token")
         _api_post(
             server_url,
@@ -828,7 +894,8 @@ class TestXSSPrevention:
         WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.ID, "msg-input")))
         driver.find_element(By.ID, "msg-input").send_keys('<script>document.title="PWNED"</script>')
         driver.find_element(By.ID, "msg-input").send_keys(Keys.RETURN)
-        time.sleep(1)
+        # The payload renders as escaped text containing PWNED; wait for it to land.
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), "PWNED"))
         assert driver.title != "PWNED"
         assert "<script>" not in driver.find_element(By.ID, "messages").get_attribute("innerHTML")
 
@@ -855,7 +922,8 @@ class TestDMConversation:
         unique = f"dm-{int(time.time())}"
         driver.find_element(By.ID, "dm-input").send_keys(unique)
         driver.find_element(By.XPATH, "//button[contains(text(),'Send DM')]").click()
-        time.sleep(1)
+        # Wait for the DM to appear in history rather than sleeping.
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "dm-messages"), unique))
         # Modal stays open
         assert driver.find_element(By.ID, "dm-modal").value_of_css_property("display") != "none"
         # Message in history
@@ -945,7 +1013,7 @@ class TestRoomDMs:
             lambda d: d.find_element(By.ID, "room-dms-modal").value_of_css_property("display") != "none"
         )
         driver.find_element(By.XPATH, "//div[@id='room-dms-modal']//button[contains(text(),'Close')]").click()
-        time.sleep(0.3)
+        wait(driver, lambda d: d.find_element(By.ID, "room-dms-modal").value_of_css_property("display") == "none")
         assert driver.find_element(By.ID, "room-dms-modal").value_of_css_property("display") == "none"
 
     def test_room_dms_escape_dismisses_modal(self, driver, server_url, logged_in, room_dms_data):
@@ -955,7 +1023,7 @@ class TestRoomDMs:
             lambda d: d.find_element(By.ID, "room-dms-modal").value_of_css_property("display") != "none"
         )
         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-        time.sleep(0.3)
+        wait(driver, lambda d: d.find_element(By.ID, "room-dms-modal").value_of_css_property("display") == "none")
         assert driver.find_element(By.ID, "room-dms-modal").value_of_css_property("display") == "none"
 
 
@@ -966,22 +1034,22 @@ class TestInfoPanel:
     def test_panel_closes_via_button(self, mobile_driver, server_url, mobile_logged_in, test_data):
         _mobile_select_room(mobile_driver, server_url, test_data)
         mobile_driver.find_element(By.CSS_SELECTOR, ".panel-toggle").click()
-        time.sleep(0.5)
         panel = mobile_driver.find_element(By.ID, "right-panel")
+        wait(mobile_driver, lambda d: panel.is_displayed())
         assert panel.is_displayed()
         mobile_driver.find_element(By.CSS_SELECTOR, ".panel-close").click()
-        time.sleep(0.5)
+        wait(mobile_driver, lambda d: not panel.is_displayed())
         assert not panel.is_displayed()
 
     def test_panel_closes_via_overlay(self, mobile_driver, server_url, mobile_logged_in, test_data):
         _mobile_select_room(mobile_driver, server_url, test_data)
         mobile_driver.find_element(By.CSS_SELECTOR, ".panel-toggle").click()
-        time.sleep(0.5)
+        wait(mobile_driver, lambda d: d.find_element(By.ID, "right-panel").is_displayed())
         assert mobile_driver.find_element(By.ID, "right-panel").is_displayed()
         # Click the overlay on the left side (not covered by the panel)
         overlay = mobile_driver.find_element(By.ID, "panel-overlay")
         mobile_driver.execute_script("arguments[0].click()", overlay)
-        time.sleep(0.5)
+        wait(mobile_driver, lambda d: not d.find_element(By.ID, "right-panel").is_displayed())
         assert not mobile_driver.find_element(By.ID, "right-panel").is_displayed()
 
 
@@ -1021,7 +1089,7 @@ class TestBrowserNavigation:
         second_title = driver.find_element(By.ID, "room-title").text
         assert first_title != second_title
         driver.back()
-        time.sleep(1)
+        wait(driver, lambda d: d.find_element(By.ID, "room-title").text == first_title)
         assert driver.find_element(By.ID, "room-title").text == first_title
 
 
@@ -1045,33 +1113,47 @@ class TestRoomPersistence:
 
 class TestEmptyStates:
     def test_empty_room_shows_placeholder(self, driver, server_url, logged_in):
-        room_name = f"empty-{int(time.time())}"
+        room_name = f"empty-{int(time.time() * 1000)}"
         driver.execute_script(f"""
+            window._empty_done=false;
             fetch('/ui/api/rooms', {{method:'POST', headers:{{'Content-Type':'application/json'}},
                 body: JSON.stringify({{name: '{room_name}', topic: ''}})
-            }})
+            }}).then(()=>window._empty_done=true)
         """)
-        time.sleep(1)
+        # Wait for the create request to finish before reloading (was time.sleep).
+        wait(driver, lambda d: d.execute_script("return window._empty_done"))
         driver.get(server_url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CSS_SELECTOR, ".room-item")))
+        # Wait for our freshly-created room to render, then click it.
+        wait(
+            driver,
+            lambda d: any(
+                room_name in t
+                for t in d.execute_script(
+                    "return Array.from(document.querySelectorAll('.room-item')).map(i => i.innerText)"
+                )
+            ),
+        )
         for item in driver.find_elements(By.CSS_SELECTOR, ".room-item"):
             if room_name in item.text:
                 item.click()
                 break
         WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.ID, "messages")))
-        time.sleep(1)
+        wait(driver, EC.text_to_be_present_in_element((By.ID, "messages"), "No messages yet"))
         assert "No messages yet" in driver.find_element(By.ID, "messages").text
 
 
-# ── Logout (MUST be last — invalidates session) ─────────────────────────
+# ── Logout ───────────────────────────────────────────────────────────────
 
 
-class TestZLogout:
-    """Named with Z prefix to run last — logout invalidates the shared session."""
-
-    def test_logout_redirects_to_login(self, driver, server_url, logged_in):
-        driver.get(server_url)
-        WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, "#sidebar h1")))
-        driver.find_element(By.XPATH, "//button[contains(text(),'Logout')]").click()
-        WebDriverWait(driver, 5).until(lambda d: "/login" in d.current_url)
-        assert "/login" in driver.current_url
+class TestLogout:
+    def test_logout_redirects_to_login(self, fresh_driver, server_url):
+        # Order-independent: use a function-scoped browser with its own login so
+        # logging out here does NOT invalidate the shared session-scoped `driver`
+        # other tests rely on. This removes the old "run last" (TestZLogout) hack.
+        _do_login(fresh_driver, server_url)
+        fresh_driver.get(server_url)
+        wait(fresh_driver, EC.presence_of_element_located((By.CSS_SELECTOR, "#sidebar h1")))
+        fresh_driver.find_element(By.XPATH, "//button[contains(text(),'Logout')]").click()
+        wait(fresh_driver, EC.url_contains("/login"))
+        assert "/login" in fresh_driver.current_url
