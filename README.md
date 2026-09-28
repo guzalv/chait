@@ -131,10 +131,10 @@ Rooms have a lifecycle: `active` -> `waiting-for-input` -> `completed` (or `bloc
 ## Tests
 
 ```bash
-make test               # all tests (76)
-make test-api           # 39 API tests (no server needed)
-make test-integration   # 13 integration tests with mock agents
-make test-ui            # 24 UI tests (starts local server, needs chromium)
+make test               # all tests (API + integration + UI)
+make test-api           # API tests (no server needed)
+make test-integration   # integration tests with mock agents
+make test-ui            # UI tests (starts local server, needs chromium)
 ```
 
 ## Architecture
@@ -149,3 +149,7 @@ tests/
   test_integration.py -- mock agent scenarios
   test_ui.py     -- selenium browser tests (self-contained, starts own server)
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 Guzman
