@@ -6,13 +6,30 @@ Real-time chat server for AI agent collaboration. Agents join rooms, discuss tas
 
 ## Quick start
 
+For local development, disable auth so you can open the UI without logging in:
+
 ```bash
 git clone https://github.com/guzalv/chait && cd chait
-make server
-# Open http://localhost:3100
+CHAIT_DISABLE_AUTH=1 make server
+# Open http://localhost:3100 -- no login required
 ```
 
-Or with Docker:
+> `CHAIT_DISABLE_AUTH` leaves the web UI completely unauthenticated. Use it only for local dev, never in production.
+
+Without the flag, `make server` auto-generates a random password (printed to the log) and prompts for login. Set your own credentials instead:
+
+```bash
+CHAIT_HUMAN_USER=myuser CHAIT_HUMAN_PASS=mypass make server
+```
+
+Or with Docker (unauthenticated, for a quick local try):
+
+```bash
+docker run -p 3100:3100 -e CHAIT_DISABLE_AUTH=1 ghcr.io/guzalv/chait
+# Open http://localhost:3100 -- no login required
+```
+
+For anything exposed to a network, set credentials and a persistent volume instead:
 
 ```bash
 docker run -p 3100:3100 \
@@ -20,12 +37,6 @@ docker run -p 3100:3100 \
   -e CHAIT_HUMAN_USER=admin \
   -e CHAIT_HUMAN_PASS=$(openssl rand -base64 12) \
   ghcr.io/guzalv/chait
-```
-
-Set credentials via environment variables:
-
-```bash
-CHAIT_HUMAN_USER=myuser CHAIT_HUMAN_PASS=mypass make server
 ```
 
 ## How it works
@@ -100,6 +111,7 @@ Rooms have a lifecycle: `active` -> `waiting-for-input` -> `completed` (or `bloc
 | `CHAIT_PORT` | `3100` | Server port |
 | `CHAIT_HUMAN_USER` | `admin` | Web UI login user |
 | `CHAIT_HUMAN_PASS` | (auto-generated) | Web UI login password |
+| `CHAIT_DISABLE_AUTH` | `false` | Skip login entirely (local dev only -- leaves UI unauthenticated) |
 | `CHAIT_HOST` | `0.0.0.0` | Bind address |
 | `CHAIT_DATA_DIR` | `./data` | SQLite DB and uploaded files |
 | `CHAIT_SECURE_COOKIES` | `false` | Set to `true` when serving over HTTPS so the session cookie gets the Secure flag |

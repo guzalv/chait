@@ -50,6 +50,7 @@ PORT = int(os.getenv("CHAIT_PORT", "3100"))
 HUMAN_USER = os.getenv("CHAIT_HUMAN_USER", "admin")
 HUMAN_PASS = os.getenv("CHAIT_HUMAN_PASS", "changeme")
 SECURE_COOKIES = os.getenv("CHAIT_SECURE_COOKIES", "false").lower() in ("1", "true", "yes")
+AUTH_DISABLED = os.getenv("CHAIT_DISABLE_AUTH", "").lower() in ("1", "true", "yes")
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 TOKEN_TTL_HOURS = int(os.getenv("CHAIT_TOKEN_TTL_HOURS", "24"))
 MAX_MESSAGE_LENGTH = 100_000  # 100 KB
@@ -432,6 +433,9 @@ def _ensure_human_password():
     An operator-provided password is never logged.
     """
     global HUMAN_PASS
+    if AUTH_DISABLED:
+        logger.warning("CHAIT_DISABLE_AUTH set: web UI is UNAUTHENTICATED. Never use in production.")
+        return
     if HUMAN_PASS and HUMAN_PASS != "changeme":
         return
     HUMAN_PASS = secrets.token_urlsafe(16)
@@ -1216,27 +1220,35 @@ async def download_document(doc_id: str, auth: dict = Depends(auth_any)):
 LOGIN_HTML = (_TEMPLATE_DIR / "login.html").read_text()
 
 
+async def _issue_session() -> RedirectResponse:
+    db = await get_db()
+    tok = secrets.token_hex(32)
+    async with _write_lock:
+        # Cookie carries the plaintext; DB keeps only its hash (pure credential).
+        await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (_hash_token(tok), _now()))
+        await db.commit()
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", secure=SECURE_COOKIES, max_age=86400 * 7)
+    return resp
+
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page():
+    if AUTH_DISABLED:
+        return await _issue_session()
     return LOGIN_HTML
 
 
 @app.post("/login")
 async def login_submit(request: Request):
+    if AUTH_DISABLED:
+        return await _issue_session()
     _check_rate(f"login:{request.client.host if request.client else 'unknown'}", max_per_minute=5)
     form = await request.form()
     if secrets.compare_digest(str(form.get("user") or ""), HUMAN_USER) and secrets.compare_digest(
         str(form.get("password") or ""), HUMAN_PASS
     ):
-        db = await get_db()
-        tok = secrets.token_hex(32)
-        async with _write_lock:
-            # Cookie carries the plaintext; DB keeps only its hash (pure credential).
-            await db.execute("INSERT INTO sessions (token, created_at) VALUES (?, ?)", (_hash_token(tok), _now()))
-            await db.commit()
-        resp = RedirectResponse("/", status_code=303)
-        resp.set_cookie("chait_session", tok, httponly=True, samesite="lax", secure=SECURE_COOKIES, max_age=86400 * 7)
-        return resp
+        return await _issue_session()
     logger.warning(
         "Login failed for user '%s' from %s", form.get("user", ""), request.client.host if request.client else "unknown"
     )
