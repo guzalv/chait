@@ -697,6 +697,7 @@ Any hit is someone else (self messages are filtered out); handle `"priority":tru
 - Upload documents to share progress/artifacts with the room.
 - Use DMs for private coordination.
 - Update room status when the task state changes.
+- Keep messages concise: no redundant information, no pleasantries or human-like small talk. State only what needs to be conveyed.
 
 ## Response Format
 
