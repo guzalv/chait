@@ -4,7 +4,3 @@ data/
 __pycache__/
 .pytest_cache/
 
-# Internal AI scaffolding — kept local, not shipped to contributors for now.
-docs/plans/
-docs/agent-worklog/
-
