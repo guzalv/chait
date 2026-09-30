@@ -31,10 +31,9 @@ fi
 
 PORT="${1:-$(( (RANDOM % 20000) + 20000 ))}"
 DATA_DIR="$(mktemp -d /tmp/chait-dev-XXXXXX)"
-PASS="dev-$(openssl rand -hex 4)"
 LOG_FILE="$DATA_DIR/server.log"
 
-setsid env CHAIT_DATA_DIR="$DATA_DIR" CHAIT_PORT="$PORT" CHAIT_HUMAN_PASS="$PASS" \
+setsid env CHAIT_DATA_DIR="$DATA_DIR" CHAIT_PORT="$PORT" CHAIT_DISABLE_AUTH=1 \
   .venv/bin/python server.py > "$LOG_FILE" 2>&1 < /dev/null &
 pid=$!
 disown
@@ -47,7 +46,7 @@ done
 
 echo "chait dev server running:"
 echo "  URL:      http://127.0.0.1:$PORT"
-echo "  Login:    admin / $PASS"
+echo "  Auth:     disabled (CHAIT_DISABLE_AUTH=1) — no login"
 echo "  Data dir: $DATA_DIR"
 echo "  Log:      $LOG_FILE"
 echo "  PID:      $pid"

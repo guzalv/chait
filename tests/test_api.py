@@ -886,6 +886,46 @@ class TestSecurityHardening:
         assert r.status_code == 303
 
 
+# ---------------------------------------------------------------------------
+# CHAIT_DISABLE_AUTH (local dev)
+# ---------------------------------------------------------------------------
+class TestAuthDisabled:
+    def test_ensure_human_password_skips_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(server, "AUTH_DISABLED", True)
+        saved = server.HUMAN_PASS
+        try:
+            server.HUMAN_PASS = "changeme"
+            server._ensure_human_password()
+            assert server.HUMAN_PASS == "changeme"  # left untouched, no password generated
+        finally:
+            server.HUMAN_PASS = saved
+
+    def test_login_page_issues_session(self, client, monkeypatch):
+        monkeypatch.setattr(server, "AUTH_DISABLED", True)
+        r = client.get("/login", follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/"
+        assert "chait_session" in r.cookies
+
+    def test_login_submit_issues_session_regardless_of_credentials(self, client, monkeypatch):
+        monkeypatch.setattr(server, "AUTH_DISABLED", True)
+        r = client.post("/login", data={"user": "whoever", "password": "wrong"}, follow_redirects=False)
+        assert r.status_code == 303
+        assert "chait_session" in r.cookies
+
+    def test_dashboard_reachable_without_prior_session(self, client, monkeypatch):
+        monkeypatch.setattr(server, "AUTH_DISABLED", True)
+        r = client.get("/", follow_redirects=True)
+        assert r.status_code == 200
+        assert "chait_session" in client.cookies
+
+    def test_login_still_required_when_not_disabled(self, client, monkeypatch):
+        monkeypatch.setattr(server, "AUTH_DISABLED", False)
+        r = client.get("/", follow_redirects=False)
+        assert r.status_code == 303
+        assert r.headers["location"] == "/login"
+
+
 class TestSecurityHeaders:
     def test_headers_present_on_normal_response(self, client):
         r = client.get("/health")
